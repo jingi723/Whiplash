@@ -1,0 +1,19 @@
+{
+  "name": "whiplash",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Slack-style stage that takes over your Claude Code and Codex sessions, wherever they started.",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "start": "node src/server.ts",
+    "test": "node --test \"src/**/*.test.ts\"",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "typescript": "^7.0.2"
+  }
+}

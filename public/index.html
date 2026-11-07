@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Whiplash</title>
+    <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <div id="app" class="app">
+      <nav class="rail" aria-label="채널">
+        <a class="brand" href="#/">WHIPLASH</a>
+        <p class="label">채널</p>
+        <div id="channels" class="channels"></div>
+        <button id="new-channel" class="ghost" type="button">+ 채널 만들기</button>
+      </nav>
+      <div id="main" class="main"></div>
+    </div>
+    <dialog id="dialog" class="dialog"></dialog>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
