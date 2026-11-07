@@ -36,6 +36,27 @@ describe('session heads', () => {
   })
 })
 
+describe('session rules lifted from Orca', () => {
+  it('prefers a rename, then the generated title, and takes the id from the records', () => {
+    const head = jsonl(
+      { type: 'user', cwd: '/repo', sessionId: 'real-id', isMeta: true, message: { content: '메타' } },
+      { type: 'user', cwd: '/repo', sessionId: 'real-id', message: { content: '첫 질문' } }
+    )
+    assert.deepEqual(parseClaudeHead(head, 'file-name'), { id: 'real-id', cwd: '/repo', title: '첫 질문' })
+    const tail = jsonl({ type: 'ai-title', aiTitle: '생성된 제목' }, { type: 'custom-title', customTitle: '내가 지은 이름' })
+    assert.equal(parseClaudeHead(head, 'file-name', tail)?.title, '내가 지은 이름')
+    assert.equal(parseClaudeHead(head, 'file-name', jsonl({ type: 'ai-title', aiTitle: '생성된 제목' }))?.title, '생성된 제목')
+  })
+
+  it("skips Codex helper threads, ignores a fork's copied meta, and reads index titles", () => {
+    const meta = (payload: object) => ({ type: 'session_meta', payload: { cwd: '/repo', ...payload } })
+    assert.equal(parseCodexHead(jsonl(meta({ id: 'a', source: { subagent: {} } }))), null)
+    assert.equal(parseCodexHead(jsonl(meta({ id: 'a', thread_source: 'guardian_review' }))), null)
+    assert.equal(parseCodexHead(jsonl(meta({ id: 'child' }), meta({ id: 'parent' })))?.id, 'child')
+    assert.equal(parseCodexHead(jsonl(meta({ id: 'a' })), new Map([['a', '이름 붙인 스레드']]))?.title, '이름 붙인 스레드')
+  })
+})
+
 describe('listSessions', () => {
   it('finds both consoles, skips subagents and sessions whose folder is gone', async () => {
     const home = mkdtempSync(join(tmpdir(), 'whiplash-'))

@@ -8,9 +8,10 @@ Whiplash takes over Claude Code and Codex sessions **wherever they started** and
 
 ## Run
 
-You need Node 24 or later and the `claude` or `codex` CLI. There are no runtime dependencies.
+You need Node 24 or later and the `claude` or `codex` CLI. The live terminal uses `node-pty` and `xterm.js`, so install dependencies first.
 
 ```bash
+npm install   # or pnpm install
 npm start
 ```
 
@@ -25,13 +26,15 @@ Open `http://127.0.0.1:4717`. Data lives in `~/.whiplash`; set `WHIPLASH_HOME` t
 | Feature | What it does |
 | --- | --- |
 | The Stage | The channel conversation. Click a member to open their Studio. |
-| The Studio | Commands as they run, the live log, changed files, diffs, and branch and worktree state. |
+| The Studio | The agent's live terminal, changed files, diffs, and branch and worktree state. Click an agent in the left rail to open it. |
 | Not quite my tempo | Reject a result with the button or `/tempo @name reason`. |
 | Stamina bar | Drains as the agent's context fills up. |
 | Throw the chair | An alert when a turn fails or the channel's check command (for example `pnpm build`) fails. |
 | Chain limit | Agents stop after passing work back and forth 6 times and wait for the conductor. |
 | Reply | Click an agent's message, and messages without `@` go to that session. |
+| Plan limits | Claude and Codex 5-hour and weekly usage with reset times, at the bottom of the left rail. |
 | Languages | English and Korean. The browser language is the default; switch with the button at the bottom left. |
+| Themes | Light and dark, following the system until you pick one. The terminal uses your Orca font and terminal themes. |
 
 ## How it works
 
@@ -39,11 +42,15 @@ Open `http://127.0.0.1:4717`. Data lives in `~/.whiplash`; set `WHIPLASH_HOME` t
 - **Takeover** runs each turn with `claude -p --resume` or `codex exec resume`. The session id stays the same, so you can reopen it in its original console.
 - **Isolation** runs every turn inside each CLI's OS sandbox, so writes outside the agent's folders are refused. An imported session may also write to the channel's project folder. Reads are not blocked.
 - **Collision guard** refuses to send to a session another console just wrote, because continuing one session from two places splits the conversation.
+- **Plan limits** are read the way Orca reads them: the Claude login from the macOS keychain (or `~/.claude/.credentials.json`) and the Codex login from `~/.codex/auth.json`. The tokens are only sent to each provider's own usage endpoint.
+- **Live terminal** runs the session's own CLI in a PTY. While it is open, Stage messages are typed into it and the reply is read from the session transcript; when it is closed, turns run headless.
 
 ## Good to know
 
 - A session that is open in a terminal can be continued in Whiplash about a minute after you close it there.
-- Commands that need approval are refused on the spot, because the sandbox has no approval prompt.
+- Headless turns refuse commands that need approval, because they have no prompt to ask. Open the terminal to approve them yourself.
+- The live terminal runs with your own CLI permission settings, not the headless sandbox.
+- If the terminal is showing a dialog, a Stage message cannot get in; Whiplash says so after 20 seconds.
 - Restarting the server clears Studio logs and stops running turns. Channels and conversations are kept.
 - The server listens only on `127.0.0.1` and refuses requests from other origins. Do not expose it.
 
@@ -54,4 +61,4 @@ npm test
 pnpm install && pnpm typecheck
 ```
 
-The design borrows Buzz's mention rules and agent chain limit, and Orca's worktree-first flow. No code from either project is included.
+The design borrows Buzz's mention rules and agent chain limit, and Orca's worktree-first flow. Code under `src/orca` and `public/orca` is adapted from Orca (MIT) and runs Orca's own tests; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). No Buzz code is included.

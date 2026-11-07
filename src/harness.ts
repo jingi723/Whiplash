@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process'
 import { createInterface } from 'node:readline'
+import { agentEnv } from './env.ts'
 import type { Harness, Member } from './model.ts'
 
 export type StudioEvent =
@@ -8,7 +9,14 @@ export type StudioEvent =
   | { kind: 'output'; text: string; isError: boolean }
   | { kind: 'status'; text: string }
 
-export type TurnResult = { ok: boolean; text: string; sessionId?: string; error?: string }
+export type TurnResult = {
+  ok: boolean
+  text: string
+  sessionId?: string
+  error?: string
+  /** The open terminal never took the prompt, usually because a dialog is waiting for the user. */
+  blocked?: boolean
+}
 
 type Parsed = {
   events: StudioEvent[]
@@ -174,6 +182,7 @@ export function runTurn(
   return new Promise((resolve) => {
     const child = spawn(command, args, {
       cwd: member.cwd,
+      env: agentEnv(),
       signal,
       stdio: ['ignore', 'pipe', 'pipe']
     })

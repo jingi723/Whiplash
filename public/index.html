@@ -5,16 +5,21 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Whiplash</title>
     <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/vendor/xterm.css" />
     <link rel="stylesheet" href="/style.css" />
   </head>
   <body>
     <div id="app" class="app">
       <nav class="rail">
-        <a class="brand" href="#/">WHIPLASH</a>
+        <a class="brand" href="#/" aria-label="Whiplash"><svg class="mark" viewBox="0 0 64 64" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="28" cy="32" r="7.5" stroke-width="4.5"/>  <path d="M36 22.5 V36" stroke-width="5.5"/>  <path d="M36 36 C36 41 42 42 45 38 C50 31 48 19 39 14 C29 8.5 14 12 10 24 C6 36 13 49 26 51 C33 52 39 50 44 46" stroke-width="4.5"/>  <path d="M44 46 C48 43 51 39 53 34" stroke-width="3.2"/>  <path d="M53 34 C54.5 30 56.5 27 59 25" stroke-width="2"/>  <path d="M59 25 L62 23.5 M59 25 L61.5 27.5 M59 25 L60.5 21.5" stroke-width="1.4"/></svg><span>WHIPLASH</span></a>
         <p id="channels-label" class="label"></p>
         <div id="channels" class="channels" role="group"></div>
+        <section id="usage" class="usage" aria-live="polite"></section>
         <button id="new-channel" class="ghost" type="button"></button>
-        <button id="language" class="ghost" type="button"></button>
+        <div class="rail-toggles">
+          <button id="theme" class="ghost" type="button"></button>
+          <button id="language" class="ghost" type="button"></button>
+        </div>
       </nav>
       <div id="main" class="main"></div>
     </div>

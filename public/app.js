@@ -1,6 +1,7 @@
 // Agent output is untrusted and this page can drive agents, so every value goes through textContent.
 import { addressTo } from './compose.js'
 import { createTranslator, pickLocale } from './i18n.js'
+import { colorMode, measure, mountTerminal, terminalTheme } from './terminal.js'
 
 const LOW_STAMINA = 25
 const DEFAULT_WINDOW = 200_000
@@ -9,11 +10,46 @@ const LIVE_SESSION_MS = 120_000
 const MENTION_QUERY = /(?:^|\s)@([\p{L}\p{N}_-]*)$/u
 const NEAR_BOTTOM_PX = 120
 
-const ui = { channels: [], activity: {}, queued: [], replyTo: {}, channelId: null, studioId: null, log: [] }
+const ui = {
+  channels: [],
+  activity: {},
+  queued: [],
+  terminals: [],
+  terminalStatus: {},
+  replyTo: {},
+  replyMessage: {},
+  channelId: null,
+  studioId: null
+}
 const main = document.querySelector('#main')
 const channelNav = document.querySelector('#channels')
 const dialog = document.querySelector('#dialog')
 const LOCALE_KEY = 'whiplash.locale'
+const THEME_KEY = 'whiplash.theme'
+
+function readStored(key) {
+  try {
+    return localStorage.getItem(key)
+  } catch {
+    return null
+  }
+}
+
+function writeStored(key, value) {
+  try {
+    localStorage.setItem(key, value)
+  } catch {
+    // Private windows can refuse storage; the choice then lasts for this page only.
+  }
+}
+
+/** An explicit light/dark choice wins; without one the page follows the system setting. */
+function applyTheme(theme) {
+  if (theme === 'light' || theme === 'dark') document.documentElement.dataset.theme = theme
+  else delete document.documentElement.dataset.theme
+}
+
+applyTheme(readStored(THEME_KEY))
 
 function savedLocale() {
   try {
@@ -39,6 +75,59 @@ function setLocale(next) {
   render()
 }
 
+const USAGE_REFRESH_MS = 120_000
+let usage = null
+
+function resetLabel(resetsAt) {
+  if (!resetsAt) return ''
+  const date = new Date(resetsAt)
+  const sameDay = date.toDateString() === new Date().toDateString()
+  const when = sameDay
+    ? date.toLocaleTimeString(locale, { hour: 'numeric', minute: '2-digit' })
+    : date.toLocaleDateString(locale, { weekday: 'short', hour: 'numeric', minute: '2-digit' })
+  return t('usage.resets', { when })
+}
+
+function usageRow(label, window) {
+  const percent = Math.round(window.usedPercent)
+  const fill = h('div')
+  fill.style.width = `${percent}%`
+  return h(
+    'div',
+    { class: 'usage-row' },
+    h('span', { class: 'usage-label' }, label, h('strong', {}, `${percent}%`)),
+    h(
+      'div',
+      { class: `stamina${percent >= 100 - LOW_STAMINA ? ' low' : ''}`, role: 'meter', 'aria-label': label, 'aria-valuemin': 0, 'aria-valuemax': 100, 'aria-valuenow': percent },
+      fill
+    ),
+    h('span', { class: 'usage-reset' }, resetLabel(window.resetsAt))
+  )
+}
+
+function renderUsage() {
+  const box = document.querySelector('#usage')
+  if (!usage) {
+    box.replaceChildren()
+    return
+  }
+  const provider = (name, data) => {
+    const rows = [
+      data.session && usageRow(`${name} ${t('usage.session')}`, data.session),
+      data.weekly && usageRow(`${name} ${t('usage.weekly')}`, data.weekly)
+    ].filter(Boolean)
+    if (rows.length) return rows
+    const note = data.error === 'signedOut' ? t('usage.signedOut') : data.error ? t('usage.unavailable') : t('usage.idle')
+    return [h('div', { class: 'usage-row' }, h('span', { class: 'usage-label' }, name, h('span', { class: 'usage-reset' }, note)))]
+  }
+  box.replaceChildren(h('p', { class: 'label' }, t('usage.title')), ...provider('Claude', usage.claude), ...provider('Codex', usage.codex))
+}
+
+async function refreshUsage() {
+  usage = await api('usage').catch(() => usage)
+  renderUsage()
+}
+
 function applyStaticText() {
   document.documentElement.lang = locale
   document.querySelector('#channels-label').textContent = t('nav.channels')
@@ -46,6 +135,8 @@ function applyStaticText() {
   document.querySelector('#new-channel').textContent = t('nav.newChannel')
   document.querySelector('#language').textContent = t('nav.switchLanguage')
   document.querySelector('#language').lang = locale === 'ko' ? 'en' : 'ko'
+  document.querySelector('#theme').textContent = t(colorMode() === 'light' ? 'nav.darkTheme' : 'nav.lightTheme')
+  renderUsage()
 }
 
 function h(tag, props = {}, ...children) {
@@ -111,8 +202,18 @@ function staminaLabel(member) {
   return t(percent < 60 ? 'stamina.tired' : 'stamina.fresh', { percent })
 }
 
+/** The terminal's own OSC 7501 report wins while it is open: it sees approvals and work typed straight into it. */
+function liveState(member) {
+  const reported = ui.terminalStatus[member.id]?.state
+  if (reported === 'blocked') return 'waiting'
+  if (reported === 'working') return 'working'
+  return ui.activity[member.id] ?? (ui.terminals.includes(member.id) ? 'attached' : 'idle')
+}
+
 function activityLabel(member) {
-  const activity = ui.activity[member.id]
+  const state = liveState(member)
+  if (state === 'waiting') return h('span', { class: 'tag waiting' }, t('activity.waiting'))
+  const activity = state === 'working' ? 'working' : ui.activity[member.id]
   const queued = ui.queued.includes(member.id) ? t('activity.queued') : ''
   if (activity === 'working') return h('span', { class: 'tag live' }, `${t('activity.working')}${queued}`)
   if (activity === 'checking') return h('span', { class: 'tag live' }, `${t('activity.checking')}${queued}`)
@@ -187,19 +288,19 @@ function messageRow(channel, message) {
     'article',
     {
       class: `message${member ? ' selectable' : ''}`,
-      'data-member': member ? member.id : undefined,
+      'data-message': message.id,
       onClick: (event) => {
         // Selecting text or pressing a button inside the message must not retarget the composer.
         if (!member || event.target.closest('button, a')) return
         if (event.detail > 1) {
           // A double click selects a word; undo the retarget its first click already made.
-          const previous = channel.members.find(({ id }) => id === targetBeforeClick)
-          setReplyTo(channel, previous ?? null)
+          const previous = channel.members.find(({ id }) => id === targetBeforeClick.memberId)
+          setReplyTo(channel, previous ?? null, { messageId: targetBeforeClick.messageId })
           return
         }
         if (getSelection()?.toString()) return
-        targetBeforeClick = ui.replyTo[channel.id]
-        setReplyTo(channel, member)
+        targetBeforeClick = { memberId: ui.replyTo[channel.id], messageId: ui.replyMessage[channel.id] }
+        setReplyTo(channel, member, { messageId: message.id })
       }
     },
     h(
@@ -216,7 +317,7 @@ function messageRow(channel, message) {
             class: 'tempo reply',
             type: 'button',
             'aria-pressed': 'false',
-            onClick: () => setReplyTo(channel, member, { focus: true })
+            onClick: () => setReplyTo(channel, member, { focus: true, messageId: message.id })
           },
           t('message.reply')
         ),
@@ -278,19 +379,21 @@ function createComposer(channelId) {
       )
     )
   }
-  const target = h('div', { class: 'target', hidden: true })
+  const chip = h('span', { class: 'chip', hidden: true })
+  const box = h('div', { class: 'composer-box' }, chip, input)
+  box.addEventListener('animationend', () => box.classList.remove('lash'))
   const showTarget = (member) => {
-    target.hidden = !member
-    target.replaceChildren(
+    chip.hidden = !member
+    chip.replaceChildren(
       ...(member
         ? [
-            t('composer.replyingTo', { name: member.name }),
+            `@${member.name}`,
             h(
               'button',
               {
                 type: 'button',
                 'aria-label': t('composer.clearTarget'),
-                onClick: () => setReplyTo(currentChannel(), null)
+                onClick: () => setReplyTo(currentChannel(), null, { focus: true })
               },
               '×'
             )
@@ -305,6 +408,9 @@ function createComposer(channelId) {
     const text = addressTo(typed, replyTo?.name)
     input.value = ''
     refresh()
+    box.classList.remove('lash')
+    void box.offsetWidth
+    box.classList.add('lash')
     await api(`channels/${channelId}/messages`, { text, locale }).catch((error) => {
       input.value = typed
       alert(error.message)
@@ -333,7 +439,9 @@ function createComposer(channelId) {
         return
       }
     }
-    if (event.key === 'Escape' && ui.replyTo[channelId]) {
+    const atStart = input.selectionStart === 0 && input.selectionEnd === 0
+    if (ui.replyTo[channelId] && (event.key === 'Escape' || (event.key === 'Backspace' && atStart))) {
+      event.preventDefault()
       setReplyTo(currentChannel(), null)
       return
     }
@@ -342,18 +450,20 @@ function createComposer(channelId) {
       void submit()
     }
   })
-  return { element: h('div', { class: 'composer' }, list, target, input), input, list, showTarget }
+  return { element: h('div', { class: 'composer' }, list, box), input, list, showTarget }
 }
 
-let targetBeforeClick
+let targetBeforeClick = {}
 
 // Why no re-render: rebuilding the messages would drop the text the user is selecting.
-function setReplyTo(channel, member, { focus = false } = {}) {
+function setReplyTo(channel, member, { focus = false, messageId } = {}) {
   if (!channel) return
   if (member) {
     ui.replyTo[channel.id] = member.id
+    ui.replyMessage[channel.id] = messageId
   } else {
     delete ui.replyTo[channel.id]
+    delete ui.replyMessage[channel.id]
   }
   if (shell?.channelId !== channel.id) return
   showReplyTarget(channel)
@@ -368,8 +478,9 @@ function showReplyTarget(channel) {
   composer.input.placeholder = replyTo
     ? t('composer.placeholderReply', { name: replyTo.name })
     : t('composer.placeholder', { channel: channel.name })
-  for (const row of list.querySelectorAll('.message[data-member]')) {
-    const targeted = row.dataset.member === replyTo?.id
+  const messageId = replyTo ? ui.replyMessage[channel.id] : undefined
+  for (const row of list.querySelectorAll('.message.selectable')) {
+    const targeted = row.dataset.message === messageId
     row.classList.toggle('targeted', targeted)
     row.querySelector('.reply')?.setAttribute('aria-pressed', String(targeted))
   }
@@ -492,79 +603,147 @@ async function loadDiff(member, path, target, button) {
   )
 }
 
-async function renderStudio(member, channel) {
-  const running = Boolean(ui.activity[member.id])
+let studio = null
+
+function studioButton(label, className, onClick, disabled = false) {
+  return h('button', { class: className, type: 'button', disabled, onClick }, label)
+}
+
+async function refreshReview(member, channel) {
   const { log, git } = await api(`members/${member.id}/studio`)
-  if (ui.studioId !== member.id) return
-  ui.log = log
-  const consoleView = h('div', { class: 'console', role: 'log', 'aria-label': t('studio.log') })
-  consoleView.append(...(log.length ? log.map(renderEntry) : [h('p', { class: 'entry output' }, t('studio.noTurns'))]))
-  const diffView = h('div', { class: 'diff', 'aria-label': t('studio.diff') }, t('studio.pickFile'))
-  const page = h(
-    'section',
-    { class: 'studio-page' },
+  if (studio?.memberId !== member.id) return
+  studio.log = log
+  if (!studio.term) showLog()
+  studio.gitBox.replaceChildren(
+    ...(git
+      ? [h('strong', {}, git.branch), git.isWorktree ? ' · worktree' : t('studio.mainCheckout'), t('studio.changes', { count: git.files.length })]
+      : [t('studio.notGit')]),
     h(
       'div',
-      { class: 'bar' },
-      h('button', { class: 'ghost', type: 'button', onClick: () => (location.hash = '#/') }, t('studio.back')),
-      h('h2', {}, `@${member.name}`),
-      activityLabel(member),
-      h('span', { class: 'path', title: t('studio.sessionFolder', { path: member.cwd }) }, projectFolder(member)),
-      h('span', { class: 'spacer' }),
-      h('div', { class: 'studio-stamina' }, staminaLabel(member), staminaBar(member)),
-      h('button', { class: 'ghost', type: 'button', disabled: !running, onClick: () => api(`members/${member.id}/stop`, {}) }, t('studio.stop')),
-      h('button', { class: 'danger', type: 'button', onClick: () => reject(member) }, 'Not quite my tempo')
-    ),
-    h(
-      'div',
-      { class: 'panes' },
-      consoleView,
-      h(
-        'div',
-        { class: 'review' },
-        h(
-          'div',
-          { class: 'git' },
-          git
-            ? [h('strong', {}, git.branch), git.isWorktree ? ' · worktree' : t('studio.mainCheckout'), t('studio.changes', { count: git.files.length })]
-            : t('studio.notGit'),
-          h(
-            'div',
-            { class: 'path', title: member.sessionId ?? '' },
-            t('studio.session', { id: member.sessionId ?? t('studio.sessionPending'), channel: channel.name })
-          )
-        ),
-        h(
-          'div',
-          { class: 'files', 'aria-label': t('studio.changedFiles') },
-          (git?.files ?? []).map((file) => {
-            const button = h(
-              'button',
-              { class: 'file', type: 'button', onClick: () => loadDiff(member, file.path, diffView, button).catch((error) => diffView.replaceChildren(error.message)) },
-              h('span', {}, file.status),
-              h('span', {}, file.path)
-            )
-            return button
-          })
-        ),
-        diffView
-      )
+      { class: 'path', title: member.sessionId ?? '' },
+      t('studio.session', { id: member.sessionId ?? t('studio.sessionPending'), channel: channel.name })
     )
   )
-  main.className = 'main studio'
-  main.replaceChildren(page)
-  consoleView.scrollTop = consoleView.scrollHeight
+  studio.files.replaceChildren(
+    ...(git?.files ?? []).map((file) => {
+      const button = h(
+        'button',
+        {
+          class: 'file',
+          type: 'button',
+          onClick: () => loadDiff(member, file.path, studio.diffView, button).catch((error) => studio.diffView.replaceChildren(error.message))
+        },
+        h('span', {}, file.status),
+        h('span', {}, file.path)
+      )
+      return button
+    })
+  )
+}
+
+function showLog() {
+  const view = h('div', { class: 'console log', role: 'log', 'aria-label': t('studio.log') })
+  view.append(...(studio.log.length ? studio.log.map(renderEntry) : [h('p', { class: 'entry output' }, t('studio.noTurns'))]))
+  const open = studioButton(t('studio.openTerminal'), 'primary', () => openTerminal(studio.memberId), Boolean(ui.activity[studio.memberId]))
+  studio.termSlot.replaceChildren(h('div', { class: 'terminal-closed' }, h('p', { class: 'hint' }, t('studio.terminalHint')), open), view)
+  studio.logView = view
+  view.scrollTop = view.scrollHeight
+}
+
+async function openTerminal(memberId) {
+  if (!studio || studio.memberId !== memberId) return
+  const size = measure(studio.termSlot)
+  await api(`members/${memberId}/terminal/open`, size).catch((error) => {
+    const hint = studio?.memberId === memberId && studio.termSlot.querySelector('.terminal-closed .hint')
+    if (hint) hint.textContent = error.message
+  })
+}
+
+/** Keeps the xterm view in step with the server: one PTY per member, shown while it lives. */
+function syncTerminal(member) {
+  const open = ui.terminals.includes(member.id)
+  if (open && !studio.term) {
+    studio.termSlot.replaceChildren()
+    studio.logView = null
+    studio.term = mountTerminal(studio.termSlot, member.id, () => {
+      studio?.term?.dispose()
+      if (studio) studio.term = null
+    })
+  } else if (!open && studio.term) {
+    studio.term.dispose()
+    studio.term = null
+    showLog()
+  } else if (!open && !studio.autoOpened && !ui.activity[member.id]) {
+    // Opening the agent shows its live terminal, as in Orca; a running headless turn must finish first.
+    studio.autoOpened = true
+    void openTerminal(member.id)
+  }
+}
+
+function disposeStudio() {
+  studio?.term?.dispose()
+  studio = null
+}
+
+function renderStudio(member, channel) {
+  if (studio?.memberId !== member.id) {
+    disposeStudio()
+    const bar = h('div', { class: 'bar' })
+    const termSlot = h('div', { class: 'terminal-slot' })
+    // The slot shares the terminal theme's background so Orca's colors meet the edge without a seam.
+    termSlot.style.background = terminalTheme().background
+    const gitBox = h('div', { class: 'git' })
+    const files = h('div', { class: 'files', 'aria-label': t('studio.changedFiles') })
+    const diffView = h('div', { class: 'diff', 'aria-label': t('studio.diff') }, t('studio.pickFile'))
+    const page = h(
+      'section',
+      { class: 'studio-page' },
+      bar,
+      h('div', { class: 'panes' }, termSlot, h('div', { class: 'review' }, gitBox, files, diffView))
+    )
+    studio = { memberId: member.id, page, bar, termSlot, gitBox, files, diffView, term: null, log: [], logView: null, autoOpened: false, wasBusy: false }
+    main.className = 'main studio'
+    main.replaceChildren(page)
+    showLog()
+    void refreshReview(member, channel)
+  } else if (main.firstChild !== studio.page) {
+    main.className = 'main studio'
+    main.replaceChildren(studio.page)
+  }
+  const busy = Boolean(ui.activity[member.id])
+  if (studio.wasBusy && !busy) void refreshReview(member, channel)
+  studio.wasBusy = busy
+  const open = ui.terminals.includes(member.id)
+  studio.bar.replaceChildren(
+    h('button', { class: 'ghost', type: 'button', onClick: () => (location.hash = '#/') }, t('studio.back')),
+    h('h2', {}, `@${member.name}`),
+    activityLabel(member),
+    h('span', { class: 'path', title: t('studio.sessionFolder', { path: member.cwd }) }, projectFolder(member)),
+    h('span', { class: 'spacer' }),
+    h('div', { class: 'studio-stamina' }, staminaLabel(member), staminaBar(member)),
+    open
+      ? studioButton(t('studio.closeTerminal'), 'ghost', () => api(`members/${member.id}/terminal/close`, {}))
+      : studioButton(t('studio.stop'), 'ghost', () => api(`members/${member.id}/stop`, {}), !busy),
+    studioButton('Not quite my tempo', 'danger', () => reject(member))
+  )
+  const startButton = studio.termSlot.querySelector('.terminal-closed .primary')
+  if (startButton) startButton.disabled = busy
+  syncTerminal(member)
+}
+
+function statusDot(member) {
+  return h('span', { class: `dot ${liveState(member)}`, 'aria-hidden': 'true' })
 }
 
 function renderChannels() {
   channelNav.replaceChildren(
-    ...ui.channels.map((channel) =>
+    ...ui.channels.flatMap((channel) => [
       h(
         'button',
         {
           class: 'channel',
           type: 'button',
-          'aria-current': channel.id === ui.channelId ? 'page' : undefined,
+          'aria-current': channel.id === ui.channelId && !ui.studioId ? 'page' : undefined,
           onClick: () => {
             ui.channelId = channel.id
             location.hash = '#/'
@@ -572,8 +751,22 @@ function renderChannels() {
           }
         },
         `# ${channel.name}`
+      ),
+      ...channel.members.map((member) =>
+        h(
+          'button',
+          {
+            class: 'agent',
+            type: 'button',
+            'aria-current': member.id === ui.studioId ? 'page' : undefined,
+            onClick: () => openStudio(member.id)
+          },
+          statusDot(member),
+          h('span', { class: 'name' }, member.name),
+          h('span', { class: 'kind' }, member.harness)
+        )
       )
-    )
+    ])
   )
 }
 
@@ -583,9 +776,10 @@ function render() {
     const channel = ui.channels.find(({ members }) => members.includes(studioMember))
     ui.channelId = channel.id
     renderChannels()
-    void renderStudio(studioMember, channel)
+    renderStudio(studioMember, channel)
     return
   }
+  disposeStudio()
   const channel = ui.channels.find(({ id }) => id === ui.channelId) ?? ui.channels[0]
   ui.channelId = channel?.id ?? null
   renderChannels()
@@ -750,7 +944,25 @@ function reject(member) {
 
 document.querySelector('#new-channel').addEventListener('click', () => void channelDialog())
 document.querySelector('#language').addEventListener('click', () => setLocale(locale === 'ko' ? 'en' : 'ko'))
+// The open terminal repaints with the matching Orca theme; runs only after startup, once studio exists.
+function repaintForTheme() {
+  if (studio) {
+    studio.termSlot.style.background = terminalTheme().background
+    studio.term?.setTheme(terminalTheme())
+  }
+  applyStaticText()
+}
+
+document.querySelector('#theme').addEventListener('click', () => {
+  const next = colorMode() === 'light' ? 'dark' : 'light'
+  writeStored(THEME_KEY, next)
+  applyTheme(next)
+  repaintForTheme()
+})
+matchMedia('(prefers-color-scheme: light)').addEventListener('change', repaintForTheme)
 applyStaticText()
+void refreshUsage()
+setInterval(() => void refreshUsage(), USAGE_REFRESH_MS)
 window.addEventListener('hashchange', route)
 
 const events = new EventSource('/api/events')
@@ -759,11 +971,14 @@ events.addEventListener('state', (event) => {
   ui.channels = next.channels
   ui.activity = next.activity
   ui.queued = next.queued ?? []
+  ui.terminals = next.terminals ?? []
+  ui.terminalStatus = next.terminalStatus ?? {}
   render()
 })
 events.addEventListener('log', (event) => {
   const { memberId, entry } = JSON.parse(event.data)
-  const view = memberId === ui.studioId ? main.querySelector('.console') : null
+  if (studio?.memberId === memberId) studio.log.push(entry)
+  const view = studio?.memberId === memberId ? studio.logView : null
   if (view) {
     view.append(renderEntry(entry))
     view.scrollTop = view.scrollHeight

@@ -34,6 +34,8 @@ export type ConductorDeps = {
   /** Newest context numbers for a finished session, and when its transcript last changed. */
   readSession: (member: Member) => Promise<(TurnRead & { updatedAt: number }) | null>
   runCheck: (command: string, cwd: string, signal: AbortSignal) => Promise<string | null>
+  /** True while Whiplash itself drives the session in an open terminal, so its writes are not foreign. */
+  isAttached?: (member: Member) => boolean
   onChange: () => void
   onStudioEvent: (memberId: string, event: StudioEvent) => void
 }
@@ -132,6 +134,9 @@ export function createConductor(deps: ConductorDeps) {
 
   /** Resuming a session another console is writing would split its conversation, so the turn is refused. */
   async function isUsedElsewhere(member: Member): Promise<boolean> {
+    if (deps.isAttached?.(member)) {
+      return false
+    }
     const session = member.sessionId ? await deps.readSession(member) : null
     const quietUntil = (member.lastTurnEndedAt ?? 0) + OWN_WRITE_GRACE_MS
     return Boolean(
@@ -170,6 +175,10 @@ export function createConductor(deps: ConductorDeps) {
     const session = await deps.readSession(member)
     member.contextTokens = session?.contextTokens ?? member.contextTokens
     member.windowTokens = session?.windowTokens ?? member.windowTokens
+    if (result.blocked) {
+      notify(channel, 'terminalBlocked', { name: member.name })
+      return
+    }
     if (!result.ok) {
       notify(channel, 'turnFailed', { name: member.name, error: result.error ?? 'Turn failed' }, member.id)
       return
@@ -236,6 +245,7 @@ export function createConductor(deps: ConductorDeps) {
   return {
     sendHumanMessage,
     channelOf,
+    isUsedElsewhere,
     activityOf: (): Record<string, Activity> => Object.fromEntries(activity),
     queuedOf: (): string[] => [...pending],
     reject(memberId: string, locale: Locale = 'en'): void {

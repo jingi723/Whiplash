@@ -1,1 +1,11 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="7" fill="#14110e"/><path d="M7 25 25 7" stroke="#e0a43c" stroke-width="3" stroke-linecap="round"/><path d="M9 7l16 18" stroke="#e0a43c" stroke-width="3" stroke-linecap="round"/></svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none" stroke-linecap="round" stroke-linejoin="round">
+  <style>g { stroke: #111111 } @media (prefers-color-scheme: dark) { g { stroke: #ededed } }</style>
+  <g>
+    <circle cx="28" cy="32" r="7.5" stroke-width="4.5"/>
+    <path d="M36 22.5 V36" stroke-width="5.5"/>
+    <path d="M36 36 C36 41 42 42 45 38 C50 31 48 19 39 14 C29 8.5 14 12 10 24 C6 36 13 49 26 51 C33 52 39 50 44 46" stroke-width="4.5"/>
+    <path d="M44 46 C48 43 51 39 53 34" stroke-width="3.2"/>
+    <path d="M53 34 C54.5 30 56.5 27 59 25" stroke-width="2"/>
+    <path d="M59 25 L62 23.5 M59 25 L61.5 27.5 M59 25 L60.5 21.5" stroke-width="1.4"/>
+  </g>
+</svg>

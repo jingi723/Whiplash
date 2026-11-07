@@ -18,11 +18,27 @@ import {
 } from './model.ts'
 import { findTranscript, listSessions } from './sessions.ts'
 import { createSaver, loadState, whiplashHome } from './store.ts'
+import { agentEnv } from './env.ts'
+import { grantClaudeWorkspaceTrust, resolveLocalClaudeTrustConfig } from './orca/claude-folder-trust-file.ts'
+import { readOrcaTerminalAppearance } from './orca-appearance.ts'
+import { readUsage } from './usage.ts'
+import { createTerminalHub } from './terminal.ts'
 import { readTranscriptTurn } from './transcript.ts'
 
 const PORT = Number(process.env.PORT ?? 4717)
 const HOST = '127.0.0.1'
-const PUBLIC_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'public')
+const ROOT_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+const PUBLIC_DIR = join(ROOT_DIR, 'public')
+/** Only these files leave node_modules, so the page can load xterm without a bundler. */
+const VENDOR_FILES: Record<string, string> = {
+  '/vendor/xterm.mjs': join(ROOT_DIR, 'node_modules/@xterm/xterm/lib/xterm.mjs'),
+  '/vendor/xterm.css': join(ROOT_DIR, 'node_modules/@xterm/xterm/css/xterm.css'),
+  '/vendor/addon-fit.mjs': join(ROOT_DIR, 'node_modules/@xterm/addon-fit/lib/addon-fit.mjs'),
+  '/vendor/addon-unicode11.mjs': join(ROOT_DIR, 'node_modules/@xterm/addon-unicode11/lib/addon-unicode11.mjs'),
+  '/vendor/addon-webgl.mjs': join(ROOT_DIR, 'node_modules/@xterm/addon-webgl/lib/addon-webgl.mjs')
+}
+const TERMINAL_MIN = 2
+const TERMINAL_MAX = 1000
 const MAX_BODY_BYTES = 1024 * 1024
 // ponytail: Studio logs live in memory; the CLI transcript stays the durable record after a restart.
 const LOG_LIMIT = 500
@@ -30,6 +46,7 @@ const CONTENT_TYPES: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
   '.svg': 'image/svg+xml'
 }
 
@@ -68,9 +85,22 @@ function publishState(): void {
   })
 }
 
+const terminals = createTerminalHub((memberId, sessionId) => {
+  const member = conductor.channelOf(memberId)?.members.find(({ id }) => id === memberId)
+  if (member) {
+    member.sessionId = sessionId
+    publishState()
+  }
+}, publishState)
+
 const conductor = createConductor({
   state,
-  runTurn,
+  // An open terminal owns its session; resuming it headlessly beside the TUI would split the conversation.
+  runTurn: (member, prompt, onEvent, signal) =>
+    terminals.isOpen(member.id)
+      ? terminals.typeTurn(member, prompt, signal)
+      : runTurn(member, prompt, onEvent, signal),
+  isAttached: (member) => terminals.isOpen(member.id),
   runCheck: runShellCheck,
   async readSession(member) {
     const path = member.sessionId ? await findTranscript(member.harness, member.sessionId) : null
@@ -92,7 +122,13 @@ const conductor = createConductor({
 })
 
 function snapshot(): unknown {
-  return { channels: state.channels, activity: conductor.activityOf(), queued: conductor.queuedOf() }
+  return {
+    channels: state.channels,
+    activity: conductor.activityOf(),
+    queued: conductor.queuedOf(),
+    terminals: terminals.openIds(),
+    terminalStatus: terminals.statuses()
+  }
 }
 
 function channelById(id: string): Channel {
@@ -179,6 +215,10 @@ async function addMember(channel: Channel, body: Record<string, unknown>): Promi
         throw new HttpError(400, 'worktreeFailed', { detail: error.message.trim() })
       })
     : channel.cwd
+  if (body.worktree && body.harness === 'claude') {
+    // As Orca does: a folder Whiplash just made needs no trust prompt. A busy config only means the prompt still shows.
+    await grantClaudeWorkspaceTrust(resolveLocalClaudeTrustConfig(agentEnv()), cwd).catch(() => 'unreadable')
+  }
   return { ...base, harness: body.harness, cwd }
 }
 
@@ -234,6 +274,12 @@ async function handleApi(
   if (route === 'GET /api/events') {
     return openEventStream(request, response)
   }
+  if (route === 'GET /api/usage') {
+    return sendJson(response, 200, await readUsage())
+  }
+  if (route === 'GET /api/terminal-appearance') {
+    return sendJson(response, 200, await readOrcaTerminalAppearance())
+  }
   if (route === 'GET /api/sessions') {
     const taken = new Set(
       state.channels.flatMap(({ members }) => members.map(({ sessionId }) => sessionId))
@@ -244,6 +290,10 @@ async function handleApi(
   if (request.method === 'GET' && parts[1] === 'members' && parts[3] === 'studio') {
     const { member } = memberById(id)
     return sendJson(response, 200, { log: logs.get(id) ?? [], git: await gitInfo(projectFolder(member)) })
+  }
+  if (request.method === 'GET' && parts[1] === 'members' && parts[3] === 'terminal') {
+    memberById(id)
+    return openTerminalStream(request, response, id)
   }
   if (request.method === 'GET' && parts[1] === 'members' && parts[3] === 'diff') {
     const { member } = memberById(id)
@@ -297,9 +347,33 @@ async function handleApi(
     conductor.stop(id)
     return sendJson(response, 202, {})
   }
+  if (parts[1] === 'members' && parts[3] === 'terminal') {
+    const { member } = memberById(id)
+    const action = parts[4]
+    if (action === 'open') {
+      if (conductor.activityOf()[id]) {
+        throw new HttpError(409, 'busy')
+      }
+      // A second live copy of a session another console is using would split its conversation.
+      if (!terminals.isOpen(id) && (await conductor.isUsedElsewhere(member))) {
+        throw new HttpError(409, 'sessionBusy')
+      }
+      terminals.open(member, terminalSize(body.cols, 120), terminalSize(body.rows, 32))
+    } else if (action === 'input' && typeof body.data === 'string') {
+      terminals.write(id, body.data)
+    } else if (action === 'resize') {
+      terminals.resize(id, terminalSize(body.cols, 120), terminalSize(body.rows, 32))
+    } else if (action === 'close') {
+      terminals.close(id)
+    } else {
+      throw new HttpError(404, 'notFound')
+    }
+    return sendJson(response, 200, {})
+  }
   if (parts[1] === 'members' && parts[3] === 'remove') {
     const { channel } = memberById(id)
     conductor.stop(id)
+    terminals.close(id)
     channel.members = channel.members.filter((member) => member.id !== id)
     publishState()
     return sendJson(response, 200, {})
@@ -307,10 +381,27 @@ async function handleApi(
   throw new HttpError(404, 'notFound')
 }
 
+function terminalSize(value: unknown, fallback: number): number {
+  const size = Math.round(Number(value))
+  return Number.isFinite(size) ? Math.min(TERMINAL_MAX, Math.max(TERMINAL_MIN, size)) : fallback
+}
+
+function openTerminalStream(request: IncomingMessage, response: ServerResponse, memberId: string): void {
+  response.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store' })
+  const unsubscribe = terminals.subscribe(memberId, (event) => {
+    response.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)
+  })
+  if (!unsubscribe) {
+    response.end('event: exit\ndata: {"type":"exit","code":0}\n\n')
+    return
+  }
+  request.on('close', unsubscribe)
+}
+
 async function serveStatic(response: ServerResponse, pathname: string): Promise<void> {
   const relative = normalize(pathname === '/' ? 'index.html' : pathname.slice(1))
-  const path = join(PUBLIC_DIR, relative)
-  if (!path.startsWith(PUBLIC_DIR + sep)) {
+  const path = VENDOR_FILES[pathname] ?? join(PUBLIC_DIR, relative)
+  if (!VENDOR_FILES[pathname] && !path.startsWith(PUBLIC_DIR + sep)) {
     throw new HttpError(404, 'notFound')
   }
   const content = await readFile(path).catch(() => {
@@ -318,7 +409,9 @@ async function serveStatic(response: ServerResponse, pathname: string): Promise<
   })
   response.writeHead(200, {
     'content-type': CONTENT_TYPES[extname(path)] ?? 'application/octet-stream',
-    'content-security-policy': "default-src 'self'; base-uri 'none'; frame-ancestors 'none'",
+    // xterm positions its rows with inline styles; scripts stay limited to this origin.
+    'content-security-policy':
+      "default-src 'self'; style-src 'self' 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'",
     'x-content-type-options': 'nosniff'
   })
   response.end(content)
@@ -361,6 +454,7 @@ server.listen(PORT, HOST, () => {
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   process.on(signal, () => {
     conductor.stopAll()
+    terminals.closeAll()
     saver.flush()
     process.exit(0)
   })
