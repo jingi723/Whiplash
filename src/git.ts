@@ -46,7 +46,7 @@ export async function fileDiff(cwd: string, path: string): Promise<string> {
   const info = await gitInfo(cwd)
   const file = info?.files.find((candidate) => candidate.path === path)
   if (!info || !file) {
-    throw new Error('변경된 파일이 아닙니다.')
+    throw new Error('notChanged')
   }
   if (file.status === '??') {
     return await run('git', ['diff', '--no-index', '--', '/dev/null', path], {

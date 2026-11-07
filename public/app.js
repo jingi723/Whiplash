@@ -1,4 +1,7 @@
 // Agent output is untrusted and this page can drive agents, so every value goes through textContent.
+import { addressTo } from './compose.js'
+import { createTranslator, pickLocale } from './i18n.js'
+
 const LOW_STAMINA = 25
 const DEFAULT_WINDOW = 200_000
 const LARGE_WINDOW = 1_000_000
@@ -6,10 +9,44 @@ const LIVE_SESSION_MS = 120_000
 const MENTION_QUERY = /(?:^|\s)@([\p{L}\p{N}_-]*)$/u
 const NEAR_BOTTOM_PX = 120
 
-const ui = { channels: [], activity: {}, channelId: null, studioId: null, log: [] }
+const ui = { channels: [], activity: {}, queued: [], replyTo: {}, channelId: null, studioId: null, log: [] }
 const main = document.querySelector('#main')
 const channelNav = document.querySelector('#channels')
 const dialog = document.querySelector('#dialog')
+const LOCALE_KEY = 'whiplash.locale'
+
+function savedLocale() {
+  try {
+    return localStorage.getItem(LOCALE_KEY)
+  } catch {
+    return null
+  }
+}
+
+let locale = pickLocale(savedLocale(), navigator.languages)
+let t = createTranslator(locale)
+
+function setLocale(next) {
+  locale = next
+  t = createTranslator(locale)
+  try {
+    localStorage.setItem(LOCALE_KEY, locale)
+  } catch {
+    // Private windows can refuse storage; the choice then lasts for this page only.
+  }
+  applyStaticText()
+  if (shell) shell.messageIds = []
+  render()
+}
+
+function applyStaticText() {
+  document.documentElement.lang = locale
+  document.querySelector('#channels-label').textContent = t('nav.channels')
+  document.querySelector('#channels').setAttribute('aria-label', t('nav.channels'))
+  document.querySelector('#new-channel').textContent = t('nav.newChannel')
+  document.querySelector('#language').textContent = t('nav.switchLanguage')
+  document.querySelector('#language').lang = locale === 'ko' ? 'en' : 'ko'
+}
 
 function h(tag, props = {}, ...children) {
   const element = document.createElement(tag)
@@ -36,7 +73,8 @@ async function api(path, body) {
   })
   const data = await response.json()
   if (!response.ok) {
-    throw new Error(data.error ?? '요청이 실패했습니다.')
+    const params = data.params?.field ? { ...data.params, field: t(`fields.${data.params.field}`) } : data.params
+    throw new Error(data.error ? t(`errors.${data.error}`, params) : t('request.failed'))
   }
   return data
 }
@@ -56,11 +94,11 @@ function staminaBar(member) {
     {
       class: `stamina${percent <= LOW_STAMINA ? ' low' : ''}`,
       role: 'meter',
-      'aria-label': `${member.name} 스태미나`,
+      'aria-label': t('stamina.aria', { name: member.name }),
       'aria-valuemin': 0,
       'aria-valuemax': 100,
       'aria-valuenow': percent,
-      title: `스태미나 ${percent}% · 컨텍스트 ${(member.contextTokens ?? 0).toLocaleString()} 토큰`
+      title: t('stamina.title', { percent, tokens: (member.contextTokens ?? 0).toLocaleString(locale) })
     },
     fill
   )
@@ -68,17 +106,20 @@ function staminaBar(member) {
 
 function staminaLabel(member) {
   const percent = staminaOf(member)
-  if (percent === 0) return '실신'
-  if (percent <= LOW_STAMINA) return `탈진 직전 ${percent}%`
-  return percent < 60 ? `지침 ${percent}%` : `쌩쌩 ${percent}%`
+  if (percent === 0) return t('stamina.out')
+  if (percent <= LOW_STAMINA) return t('stamina.low', { percent })
+  return t(percent < 60 ? 'stamina.tired' : 'stamina.fresh', { percent })
 }
 
 function activityLabel(member) {
   const activity = ui.activity[member.id]
-  if (activity === 'working') return h('span', { class: 'tag live' }, '연주 중')
-  if (activity === 'queued') return h('span', { class: 'tag live' }, '대기열')
+  const queued = ui.queued.includes(member.id) ? t('activity.queued') : ''
+  if (activity === 'working') return h('span', { class: 'tag live' }, `${t('activity.working')}${queued}`)
+  if (activity === 'checking') return h('span', { class: 'tag live' }, `${t('activity.checking')}${queued}`)
   return h('span', { class: 'tag' }, member.harness)
 }
+
+const projectFolder = (member) => member.writableRoots?.[0] ?? member.cwd
 
 function inline(text, members) {
   const names = new Set(members.map(({ name }) => name.toLowerCase()).concat('all'))
@@ -126,25 +167,41 @@ function messageRow(channel, message) {
         class: `system${member ? ' alert' : ''}${member && fresh ? ' fresh' : ''}`,
         role: member ? 'alert' : undefined
       },
-      message.text,
+      message.notice ? t(`notices.${message.notice.key}`, message.notice.params) : message.text,
       member &&
         h(
           'div',
           { class: 'actions' },
           h(
             'button',
-            { class: 'danger', type: 'button', onClick: () => api(`members/${member.id}/reject`, {}) },
-            '의자 던지기'
+            { class: 'danger', type: 'button', onClick: () => reject(member) },
+            t('message.chair')
           ),
           h('button', { class: 'ghost', type: 'button', onClick: () => openStudio(member.id) }, 'Studio')
         )
     )
   }
   const member = author.kind === 'agent' && channel.members.find(({ id }) => id === author.memberId)
-  const name = author.kind === 'human' ? '지휘자' : `@${author.name}`
+  const name = author.kind === 'human' ? t('message.conductor') : `@${author.name}`
   return h(
     'article',
-    { class: 'message' },
+    {
+      class: `message${member ? ' selectable' : ''}`,
+      'data-member': member ? member.id : undefined,
+      onClick: (event) => {
+        // Selecting text or pressing a button inside the message must not retarget the composer.
+        if (!member || event.target.closest('button, a')) return
+        if (event.detail > 1) {
+          // A double click selects a word; undo the retarget its first click already made.
+          const previous = channel.members.find(({ id }) => id === targetBeforeClick)
+          setReplyTo(channel, previous ?? null)
+          return
+        }
+        if (getSelection()?.toString()) return
+        targetBeforeClick = ui.replyTo[channel.id]
+        setReplyTo(channel, member)
+      }
+    },
     h(
       'header',
       {},
@@ -155,7 +212,18 @@ function messageRow(channel, message) {
       member &&
         h(
           'button',
-          { class: 'tempo', type: 'button', onClick: () => api(`members/${member.id}/reject`, {}) },
+          {
+            class: 'tempo reply',
+            type: 'button',
+            'aria-pressed': 'false',
+            onClick: () => setReplyTo(channel, member, { focus: true })
+          },
+          t('message.reply')
+        ),
+      member &&
+        h(
+          'button',
+          { class: 'tempo', type: 'button', onClick: () => reject(member) },
           'Not quite my tempo'
         )
     ),
@@ -165,7 +233,7 @@ function messageRow(channel, message) {
 
 function createComposer(channelId) {
   const input = h('textarea', { rows: 2 })
-  const list = h('ul', { class: 'suggestions', role: 'listbox', 'aria-label': '멘션할 멤버', hidden: true })
+  const list = h('ul', { class: 'suggestions', role: 'listbox', hidden: true })
   let active = 0
 
   const currentChannel = () => ui.channels.find(({ id }) => id === channelId)
@@ -210,13 +278,35 @@ function createComposer(channelId) {
       )
     )
   }
+  const target = h('div', { class: 'target', hidden: true })
+  const showTarget = (member) => {
+    target.hidden = !member
+    target.replaceChildren(
+      ...(member
+        ? [
+            t('composer.replyingTo', { name: member.name }),
+            h(
+              'button',
+              {
+                type: 'button',
+                'aria-label': t('composer.clearTarget'),
+                onClick: () => setReplyTo(currentChannel(), null)
+              },
+              '×'
+            )
+          ]
+        : [])
+    )
+  }
   const submit = async () => {
-    const text = input.value.trim()
-    if (!text) return
+    const typed = input.value.trim()
+    if (!typed) return
+    const replyTo = currentChannel()?.members.find(({ id }) => id === ui.replyTo[channelId])
+    const text = addressTo(typed, replyTo?.name)
     input.value = ''
     refresh()
-    await api(`channels/${channelId}/messages`, { text }).catch((error) => {
-      input.value = text
+    await api(`channels/${channelId}/messages`, { text, locale }).catch((error) => {
+      input.value = typed
       alert(error.message)
     })
   }
@@ -243,12 +333,76 @@ function createComposer(channelId) {
         return
       }
     }
+    if (event.key === 'Escape' && ui.replyTo[channelId]) {
+      setReplyTo(currentChannel(), null)
+      return
+    }
     if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault()
       void submit()
     }
   })
-  return { element: h('div', { class: 'composer' }, list, input), input }
+  return { element: h('div', { class: 'composer' }, list, target, input), input, list, showTarget }
+}
+
+let targetBeforeClick
+
+// Why no re-render: rebuilding the messages would drop the text the user is selecting.
+function setReplyTo(channel, member, { focus = false } = {}) {
+  if (!channel) return
+  if (member) {
+    ui.replyTo[channel.id] = member.id
+  } else {
+    delete ui.replyTo[channel.id]
+  }
+  if (shell?.channelId !== channel.id) return
+  showReplyTarget(channel)
+  if (focus) shell.composer.input.focus()
+}
+
+function showReplyTarget(channel) {
+  const { composer, list } = shell
+  const replyTo = channel.members.find(({ id }) => id === ui.replyTo[channel.id])
+  if (!replyTo) delete ui.replyTo[channel.id]
+  composer.showTarget(replyTo)
+  composer.input.placeholder = replyTo
+    ? t('composer.placeholderReply', { name: replyTo.name })
+    : t('composer.placeholder', { channel: channel.name })
+  for (const row of list.querySelectorAll('.message[data-member]')) {
+    const targeted = row.dataset.member === replyTo?.id
+    row.classList.toggle('targeted', targeted)
+    row.querySelector('.reply')?.setAttribute('aria-pressed', String(targeted))
+  }
+}
+
+/** Appends only new messages, so a state update does not drop a selection; anything else rebuilds. */
+function renderMessages(channel) {
+  const { list } = shell
+  const ids = channel.messages.map(({ id }) => id)
+  const membersKey = channel.members.map(({ id }) => id).join()
+  const shown = shell.messageIds
+  const appendOnly =
+    shown.length > 0 &&
+    shell.membersKey === membersKey &&
+    shown.length <= ids.length &&
+    shown.every((id, index) => ids[index] === id)
+  if (!appendOnly) {
+    list.replaceChildren()
+  }
+  const fresh = channel.messages.slice(appendOnly ? shown.length : 0)
+  list.append(...fresh.map((message) => messageRow(channel, message)))
+  if (ids.length === 0) {
+    list.replaceChildren(
+      h(
+        'div',
+        { class: 'empty' },
+        h('strong', {}, t('stage.emptyTitle')),
+        t('stage.emptyBody')
+      )
+    )
+  }
+  shell.messageIds = ids
+  shell.membersKey = membersKey
 }
 
 let shell = null
@@ -261,6 +415,8 @@ function createShell(channelId) {
   const buttons = h('footer')
   return {
     channelId,
+    messageIds: [],
+    membersKey: '',
     composer,
     bar,
     list,
@@ -268,7 +424,7 @@ function createShell(channelId) {
     buttons,
     nodes: [
       h('section', { class: 'stage' }, bar, list, composer.element),
-      h('aside', { class: 'roster', 'aria-label': '멤버' }, members, buttons)
+      h('aside', { class: 'roster' }, members, buttons)
     ]
   }
 }
@@ -284,53 +440,45 @@ function renderStage(channel) {
     main.className = 'main'
     main.replaceChildren(...nodes)
   }
-  composer.input.setAttribute('aria-label', `#${channel.name}에 메시지 보내기`)
-  composer.input.placeholder = `#${channel.name}에 지휘하기 · @이름으로 호출, /tempo @이름 사유로 반려`
+  composer.input.setAttribute('aria-label', t('composer.aria', { channel: channel.name }))
+  composer.list.setAttribute('aria-label', t('composer.suggestions'))
+  nodes[1].setAttribute('aria-label', t('stage.members'))
   bar.replaceChildren(
     h('h1', {}, `# ${channel.name}`),
     h('span', { class: 'path', title: channel.cwd }, channel.cwd),
     ...(channel.checkCommand
-      ? [h('span', { class: 'tag', title: '턴이 끝날 때마다 실행합니다' }, `검사: ${channel.checkCommand}`)]
+      ? [h('span', { class: 'tag', title: t('stage.checkTitle') }, t('stage.check', { command: channel.checkCommand }))]
       : [])
   )
-  list.setAttribute('aria-label', `#${channel.name} 대화`)
-  list.replaceChildren(
-    ...(channel.messages.length
-      ? channel.messages.map((message) => messageRow(channel, message))
-      : [
-          h(
-            'div',
-            { class: 'empty' },
-            h('strong', {}, '무대가 비었습니다'),
-            '세션을 가져오거나 에이전트를 영입한 뒤 @이름으로 호출하세요.'
-          )
-        ])
-  )
+  list.setAttribute('aria-label', t('stage.log', { channel: channel.name }))
+  renderMessages(channel)
+  showReplyTarget(channel)
   members.replaceChildren(
-    h('p', { class: 'label' }, '멤버'),
+    h('p', { class: 'label' }, t('stage.members')),
     ...channel.members.map((member) =>
       h(
         'button',
-        { class: 'member', type: 'button', title: 'Studio 열기', onClick: () => openStudio(member.id) },
+        { class: 'member', type: 'button', title: t('stage.openStudio'), onClick: () => openStudio(member.id) },
         h('span', { class: 'row' }, h('span', { class: 'name' }, `@${member.name}`), activityLabel(member)),
         staminaBar(member)
       )
     )
   )
   buttons.replaceChildren(
-    h('button', { class: 'primary', type: 'button', onClick: () => importDialog(channel) }, '세션 가져오기'),
-    h('button', { class: 'ghost', type: 'button', onClick: () => hireDialog(channel) }, '새 에이전트 영입')
+    h('button', { class: 'primary', type: 'button', onClick: () => importDialog(channel) }, t('stage.import')),
+    h('button', { class: 'ghost', type: 'button', onClick: () => hireDialog(channel) }, t('stage.hire'))
   )
   if (stick) list.scrollTop = list.scrollHeight
 }
 
 function renderEntry(entry) {
   const kind = entry.kind === 'output' && entry.isError ? 'output error' : entry.kind
-  return h('p', { class: `entry ${kind}` }, entry.text)
+  const text = entry.kind === 'status' && entry.text === 'connected' ? t('studio.connected') : entry.text
+  return h('p', { class: `entry ${kind}` }, text)
 }
 
 async function loadDiff(member, path, target, button) {
-  target.replaceChildren('불러오는 중')
+  target.replaceChildren(t('studio.loading'))
   main.querySelectorAll('.file').forEach((file) => file.removeAttribute('aria-current'))
   button.setAttribute('aria-current', 'true')
   const { diff } = await api(`members/${member.id}/diff?path=${encodeURIComponent(path)}`)
@@ -349,23 +497,23 @@ async function renderStudio(member, channel) {
   const { log, git } = await api(`members/${member.id}/studio`)
   if (ui.studioId !== member.id) return
   ui.log = log
-  const consoleView = h('div', { class: 'console', role: 'log', 'aria-label': '실시간 로그' })
-  consoleView.append(...(log.length ? log.map(renderEntry) : [h('p', { class: 'entry output' }, '이 Whiplash 실행에서 아직 연주한 턴이 없습니다.')]))
-  const diffView = h('div', { class: 'diff', 'aria-label': '변경 내용' }, '파일을 고르면 변경 내용이 보입니다.')
+  const consoleView = h('div', { class: 'console', role: 'log', 'aria-label': t('studio.log') })
+  consoleView.append(...(log.length ? log.map(renderEntry) : [h('p', { class: 'entry output' }, t('studio.noTurns'))]))
+  const diffView = h('div', { class: 'diff', 'aria-label': t('studio.diff') }, t('studio.pickFile'))
   const page = h(
     'section',
     { class: 'studio-page' },
     h(
       'div',
       { class: 'bar' },
-      h('button', { class: 'ghost', type: 'button', onClick: () => (location.hash = '#/') }, '← Stage'),
+      h('button', { class: 'ghost', type: 'button', onClick: () => (location.hash = '#/') }, t('studio.back')),
       h('h2', {}, `@${member.name}`),
       activityLabel(member),
-      h('span', { class: 'path', title: member.cwd }, member.cwd),
+      h('span', { class: 'path', title: t('studio.sessionFolder', { path: member.cwd }) }, projectFolder(member)),
       h('span', { class: 'spacer' }),
       h('div', { class: 'studio-stamina' }, staminaLabel(member), staminaBar(member)),
-      h('button', { class: 'ghost', type: 'button', disabled: !running, onClick: () => api(`members/${member.id}/stop`, {}) }, '멈추기'),
-      h('button', { class: 'danger', type: 'button', onClick: () => api(`members/${member.id}/reject`, {}) }, 'Not quite my tempo')
+      h('button', { class: 'ghost', type: 'button', disabled: !running, onClick: () => api(`members/${member.id}/stop`, {}) }, t('studio.stop')),
+      h('button', { class: 'danger', type: 'button', onClick: () => reject(member) }, 'Not quite my tempo')
     ),
     h(
       'div',
@@ -378,13 +526,17 @@ async function renderStudio(member, channel) {
           'div',
           { class: 'git' },
           git
-            ? [h('strong', {}, git.branch), git.isWorktree ? ' · worktree' : ' · 기본 체크아웃', ` · 변경 ${git.files.length}개`]
-            : 'git 저장소가 아닙니다.',
-          h('div', { class: 'path', title: member.sessionId ?? '' }, `세션 ${member.sessionId ?? '첫 호출 때 생성'} · #${channel.name}`)
+            ? [h('strong', {}, git.branch), git.isWorktree ? ' · worktree' : t('studio.mainCheckout'), t('studio.changes', { count: git.files.length })]
+            : t('studio.notGit'),
+          h(
+            'div',
+            { class: 'path', title: member.sessionId ?? '' },
+            t('studio.session', { id: member.sessionId ?? t('studio.sessionPending'), channel: channel.name })
+          )
         ),
         h(
           'div',
-          { class: 'files', 'aria-label': '변경된 파일' },
+          { class: 'files', 'aria-label': t('studio.changedFiles') },
           (git?.files ?? []).map((file) => {
             const button = h(
               'button',
@@ -446,7 +598,7 @@ function render() {
         'div',
         { class: 'empty' },
         h('strong', {}, 'Not quite my tempo.'),
-        '채널을 만들면 무대가 열립니다.'
+        t('home.body')
       )
     )
   }
@@ -476,7 +628,7 @@ function showDialog(title, fields, submitLabel, onSubmit) {
     h(
       'div',
       { class: 'buttons' },
-      h('button', { class: 'ghost', type: 'button', onClick: () => dialog.close() }, '취소'),
+      h('button', { class: 'ghost', type: 'button', onClick: () => dialog.close() }, t('dialog.cancel')),
       h('button', { class: 'primary', type: 'submit' }, submitLabel)
     )
   )
@@ -492,15 +644,15 @@ async function channelDialog() {
   const { sessions } = await api('sessions')
   const folders = h('datalist', { id: 'folders' }, [...new Set(sessions.map(({ cwd }) => cwd))].map((cwd) => h('option', { value: cwd })))
   showDialog(
-    '채널 만들기',
+    t('channel.title'),
     [
-      field('이름', h('input', { name: 'name', required: true, autofocus: true, placeholder: 'general' })),
-      field('프로젝트 폴더', h('input', { name: 'cwd', required: true, list: 'folders', placeholder: '/Users/you/projects/app' })),
+      field(t('channel.name'), h('input', { name: 'name', required: true, autofocus: true, placeholder: 'general' })),
+      field(t('channel.folder'), h('input', { name: 'cwd', required: true, list: 'folders', placeholder: '/Users/you/projects/app' })),
       folders,
-      field('턴 후 검사 명령 (선택)', h('input', { name: 'checkCommand', placeholder: 'pnpm build' })),
-      h('p', { class: 'hint' }, '검사가 실패하면 빌드 에러로 보고 채널에 경고를 올립니다.')
+      field(t('channel.check'), h('input', { name: 'checkCommand', placeholder: 'pnpm build' })),
+      h('p', { class: 'hint' }, t('channel.checkHint'))
     ],
-    '만들기',
+    t('channel.submit'),
     async (data) => {
       const { channel } = await api('channels', Object.fromEntries(data))
       // The response can beat the event stream, and the room's buttons must not keep pointing at the old channel.
@@ -514,14 +666,14 @@ async function channelDialog() {
 
 function hireDialog(channel) {
   showDialog(
-    `#${channel.name}에 새 에이전트 영입`,
+    t('hire.title', { channel: channel.name }),
     [
-      field('이름', h('input', { name: 'name', required: true, autofocus: true, placeholder: 'Coder-Agent' })),
-      field('종류', h('select', { name: 'harness' }, h('option', { value: 'claude' }, 'Claude Code'), h('option', { value: 'codex' }, 'Codex'))),
-      field('지시문 (선택)', h('textarea', { name: 'instructions', rows: 3 })),
-      h('label', { class: 'check' }, h('input', { type: 'checkbox', name: 'worktree', checked: true }), '전용 git worktree에서 작업')
+      field(t('hire.name'), h('input', { name: 'name', required: true, autofocus: true, placeholder: 'Coder-Agent' })),
+      field(t('hire.kind'), h('select', { name: 'harness' }, h('option', { value: 'claude' }, 'Claude Code'), h('option', { value: 'codex' }, 'Codex'))),
+      field(t('hire.instructions'), h('textarea', { name: 'instructions', rows: 3 })),
+      h('label', { class: 'check' }, h('input', { type: 'checkbox', name: 'worktree', checked: true }), t('hire.worktree'))
     ],
-    '영입',
+    t('hire.submit'),
     async (data) => {
       await api(`channels/${channel.id}/members`, {
         name: data.get('name'),
@@ -535,10 +687,10 @@ function hireDialog(channel) {
 
 function timeAgo(at) {
   const minutes = Math.round((Date.now() - at) / 60_000)
-  if (minutes < 1) return '방금'
-  if (minutes < 60) return `${minutes}분 전`
+  if (minutes < 1) return t('time.now')
+  if (minutes < 60) return t('time.minutes', { count: minutes })
   const hours = Math.round(minutes / 60)
-  return hours < 24 ? `${hours}시간 전` : `${Math.round(hours / 24)}일 전`
+  return hours < 24 ? t('time.hours', { count: hours }) : t('time.days', { count: Math.round(hours / 24) })
 }
 
 async function importDialog(channel) {
@@ -558,26 +710,26 @@ async function importDialog(channel) {
           name.value ||= `${session.harness}-${session.id.slice(0, 4)}`
         }
       },
-      h('span', { class: 'title' }, session.title || '(제목 없음)'),
+      h('span', { class: 'title' }, session.title || t('import.untitled')),
       h('span', { class: 'path' }, session.cwd),
       h(
         'span',
         { class: 'time' },
-        `${session.harness} · ${timeAgo(session.updatedAt)}${Date.now() - session.updatedAt < LIVE_SESSION_MS ? ' · 지금 다른 콘솔에서 쓰는 중일 수 있음' : ''}`
+        `${session.harness} · ${timeAgo(session.updatedAt)}${Date.now() - session.updatedAt < LIVE_SESSION_MS ? t('import.live') : ''}`
       )
     )
     return row
   })
   showDialog(
-    '세션 가져오기',
+    t('import.title'),
     [
-      h('p', { class: 'hint' }, 'Claude Code, Codex, Orca 어디서 시작했든 가져와 이어갑니다. 터미널에 열려 있는 세션은 닫고 가져오는 게 안전합니다.'),
-      h('div', { class: 'sessions' }, rows.length ? rows : h('p', { class: 'hint' }, '가져올 세션이 없습니다.')),
-      field('Stage에서 쓸 이름', name)
+      h('p', { class: 'hint' }, t('import.hint')),
+      h('div', { class: 'sessions' }, rows.length ? rows : h('p', { class: 'hint' }, t('import.none'))),
+      field(t('import.name'), name)
     ],
-    '가져오기',
+    t('import.submit'),
     async (data) => {
-      if (!selected) throw new Error('세션을 고르세요.')
+      if (!selected) throw new Error(t('import.pick'))
       await api(`channels/${channel.id}/members`, {
         name: data.get('name'),
         harness: selected.harness,
@@ -592,7 +744,13 @@ function route() {
   render()
 }
 
+function reject(member) {
+  return api(`members/${member.id}/reject`, { locale })
+}
+
 document.querySelector('#new-channel').addEventListener('click', () => void channelDialog())
+document.querySelector('#language').addEventListener('click', () => setLocale(locale === 'ko' ? 'en' : 'ko'))
+applyStaticText()
 window.addEventListener('hashchange', route)
 
 const events = new EventSource('/api/events')
@@ -600,6 +758,7 @@ events.addEventListener('state', (event) => {
   const next = JSON.parse(event.data)
   ui.channels = next.channels
   ui.activity = next.activity
+  ui.queued = next.queued ?? []
   render()
 })
 events.addEventListener('log', (event) => {

@@ -7,7 +7,15 @@ import { fileURLToPath } from 'node:url'
 import { createConductor, runShellCheck } from './conductor.ts'
 import { createWorktree, fileDiff, gitInfo } from './git.ts'
 import { runTurn, type StudioEvent } from './harness.ts'
-import { isValidMemberName, type Channel, type Harness, type Member } from './model.ts'
+import {
+  english,
+  isValidMemberName,
+  projectFolder,
+  toLocale,
+  type Channel,
+  type Harness,
+  type Member
+} from './model.ts'
 import { findTranscript, listSessions } from './sessions.ts'
 import { createSaver, loadState, whiplashHome } from './store.ts'
 import { readTranscriptTurn } from './transcript.ts'
@@ -25,11 +33,17 @@ const CONTENT_TYPES: Record<string, string> = {
   '.svg': 'image/svg+xml'
 }
 
+/** Errors carry a code the browser translates; `message` is English for API clients. */
 class HttpError extends Error {
   status: number
-  constructor(status: number, message: string) {
-    super(message)
+  code: string
+  params: Record<string, string>
+  constructor(status: number, code: string, params: Record<string, string> = {}) {
+    const field = params.field ? { field: english(`fields.${params.field}`) } : {}
+    super(english(`errors.${code}`, { ...params, ...field }))
     this.status = status
+    this.code = code
+    this.params = params
   }
 }
 
@@ -78,13 +92,13 @@ const conductor = createConductor({
 })
 
 function snapshot(): unknown {
-  return { channels: state.channels, activity: conductor.activityOf() }
+  return { channels: state.channels, activity: conductor.activityOf(), queued: conductor.queuedOf() }
 }
 
 function channelById(id: string): Channel {
   const channel = state.channels.find((candidate) => candidate.id === id)
   if (!channel) {
-    throw new HttpError(404, '채널이 없습니다.')
+    throw new HttpError(404, 'channelNotFound')
   }
   return channel
 }
@@ -93,33 +107,33 @@ function memberById(id: string): { channel: Channel; member: Member } {
   const channel = conductor.channelOf(id)
   const member = channel?.members.find((candidate) => candidate.id === id)
   if (!channel || !member) {
-    throw new HttpError(404, '멤버가 없습니다.')
+    throw new HttpError(404, 'memberNotFound')
   }
   return { channel, member }
 }
 
-function requireText(value: unknown, label: string): string {
+function requireText(value: unknown, field: string): string {
   if (typeof value !== 'string' || !value.trim()) {
-    throw new HttpError(400, `${label}이(가) 필요합니다.`)
+    throw new HttpError(400, 'required', { field })
   }
   return value.trim()
 }
 
 function requireFolder(value: unknown): string {
-  const path = requireText(value, '폴더')
+  const path = requireText(value, 'folder')
   if (!existsSync(path) || !statSync(path).isDirectory()) {
-    throw new HttpError(400, `폴더를 찾을 수 없습니다: ${path}`)
+    throw new HttpError(400, 'folderNotFound', { path })
   }
   return path
 }
 
 function requireMemberName(channel: Channel, value: unknown): string {
-  const name = requireText(value, '이름')
+  const name = requireText(value, 'name')
   if (!isValidMemberName(name)) {
-    throw new HttpError(400, '이름은 글자, 숫자, -, _만 쓸 수 있고 all은 예약어입니다.')
+    throw new HttpError(400, 'invalidName')
   }
   if (channel.members.some((member) => member.name.toLowerCase() === name.toLowerCase())) {
-    throw new HttpError(400, '이미 있는 이름입니다.')
+    throw new HttpError(400, 'nameTaken')
   }
   return name
 }
@@ -133,24 +147,26 @@ async function addMember(channel: Channel, body: Record<string, unknown>): Promi
   if (typeof body.sessionId === 'string') {
     const harness = body.harness as Harness
     if (state.channels.some(({ members }) => members.some((m) => m.sessionId === body.sessionId))) {
-      throw new HttpError(400, '이미 가져온 세션입니다.')
+      throw new HttpError(400, 'sessionTaken')
     }
     const session = (await listSessions(undefined, Number.MAX_SAFE_INTEGER)).find(
       (candidate) => candidate.id === body.sessionId && candidate.harness === harness
     )
     if (!session) {
-      throw new HttpError(404, '세션을 찾을 수 없습니다.')
+      throw new HttpError(404, 'sessionNotFound')
     }
     return {
       ...base,
       harness,
       cwd: session.cwd,
+      // A session must resume from its original folder, so the channel's project is granted on top.
+      ...(session.cwd === channel.cwd ? {} : { writableRoots: [channel.cwd] }),
       sessionId: session.id,
       deliveredThrough: joinedAt
     }
   }
   if (body.harness !== 'claude' && body.harness !== 'codex') {
-    throw new HttpError(400, '에이전트 종류는 claude 또는 codex입니다.')
+    throw new HttpError(400, 'invalidHarness')
   }
   const cwd = body.worktree
     ? await createWorktree(
@@ -159,20 +175,22 @@ async function addMember(channel: Channel, body: Record<string, unknown>): Promi
         channel.name,
         name,
         id.slice(0, 6)
-      )
+      ).catch((error: Error) => {
+        throw new HttpError(400, 'worktreeFailed', { detail: error.message.trim() })
+      })
     : channel.cwd
   return { ...base, harness: body.harness, cwd }
 }
 
 async function readJson(request: IncomingMessage): Promise<Record<string, unknown>> {
   if (!request.headers['content-type']?.startsWith('application/json')) {
-    throw new HttpError(415, 'JSON만 받습니다.')
+    throw new HttpError(415, 'jsonOnly')
   }
   let raw = ''
   for await (const chunk of request) {
     raw += chunk
     if (raw.length > MAX_BODY_BYTES) {
-      throw new HttpError(413, '요청이 너무 큽니다.')
+      throw new HttpError(413, 'tooLarge')
     }
   }
   return raw ? (JSON.parse(raw) as Record<string, unknown>) : {}
@@ -225,24 +243,24 @@ async function handleApi(
   }
   if (request.method === 'GET' && parts[1] === 'members' && parts[3] === 'studio') {
     const { member } = memberById(id)
-    return sendJson(response, 200, { log: logs.get(id) ?? [], git: await gitInfo(member.cwd) })
+    return sendJson(response, 200, { log: logs.get(id) ?? [], git: await gitInfo(projectFolder(member)) })
   }
   if (request.method === 'GET' && parts[1] === 'members' && parts[3] === 'diff') {
     const { member } = memberById(id)
-    const diff = await fileDiff(member.cwd, url.searchParams.get('path') ?? '').catch((error) => {
-      throw new HttpError(400, error.message)
+    const diff = await fileDiff(projectFolder(member), url.searchParams.get('path') ?? '').catch(() => {
+      throw new HttpError(400, 'notChanged')
     })
     return sendJson(response, 200, { diff })
   }
   if (request.method !== 'POST') {
-    throw new HttpError(404, '없는 경로입니다.')
+    throw new HttpError(404, 'notFound')
   }
 
   const body = await readJson(request)
   if (route === 'POST /api/channels') {
     const channel: Channel = {
       id: randomUUID(),
-      name: requireText(body.name, '채널 이름'),
+      name: requireText(body.name, 'channelName'),
       cwd: requireFolder(body.cwd),
       checkCommand: String(body.checkCommand ?? '').trim(),
       members: [],
@@ -256,20 +274,22 @@ async function handleApi(
   }
   if (parts[1] === 'channels' && parts[3] === 'members') {
     const channel = channelById(id)
-    const member = await addMember(channel, body).catch((error) => {
-      throw error instanceof HttpError ? error : new HttpError(400, error.message)
-    })
+    const member = await addMember(channel, body)
     channel.members.push(member)
     publishState()
     return sendJson(response, 201, { id: member.id })
   }
   if (parts[1] === 'channels' && parts[3] === 'messages') {
-    conductor.sendHumanMessage(channelById(id), requireText(body.text, '메시지'))
+    conductor.sendHumanMessage(
+      channelById(id),
+      requireText(body.text, 'message'),
+      toLocale(body.locale)
+    )
     return sendJson(response, 202, {})
   }
   if (parts[1] === 'members' && parts[3] === 'reject') {
     memberById(id)
-    conductor.reject(id)
+    conductor.reject(id, toLocale(body.locale))
     return sendJson(response, 202, {})
   }
   if (parts[1] === 'members' && parts[3] === 'stop') {
@@ -284,17 +304,17 @@ async function handleApi(
     publishState()
     return sendJson(response, 200, {})
   }
-  throw new HttpError(404, '없는 경로입니다.')
+  throw new HttpError(404, 'notFound')
 }
 
 async function serveStatic(response: ServerResponse, pathname: string): Promise<void> {
   const relative = normalize(pathname === '/' ? 'index.html' : pathname.slice(1))
   const path = join(PUBLIC_DIR, relative)
   if (!path.startsWith(PUBLIC_DIR + sep)) {
-    throw new HttpError(404, '없는 경로입니다.')
+    throw new HttpError(404, 'notFound')
   }
   const content = await readFile(path).catch(() => {
-    throw new HttpError(404, '없는 경로입니다.')
+    throw new HttpError(404, 'notFound')
   })
   response.writeHead(200, {
     'content-type': CONTENT_TYPES[extname(path)] ?? 'application/octet-stream',
@@ -307,7 +327,7 @@ async function serveStatic(response: ServerResponse, pathname: string): Promise<
 const server = createServer((request, response) => {
   void (async () => {
     if (!isTrustedRequest(request)) {
-      throw new HttpError(403, '허용되지 않은 출처입니다.')
+      throw new HttpError(403, 'forbidden')
     }
     const url = new URL(request.url ?? '/', `http://${HOST}:${PORT}`)
     if (url.pathname.startsWith('/api/')) {
@@ -316,15 +336,21 @@ const server = createServer((request, response) => {
       await serveStatic(response, url.pathname)
     }
   })().catch((error: Error) => {
-    if (error instanceof SyntaxError) {
-      sendJson(response, 400, { error: 'JSON 형식이 잘못됐습니다.' })
-      return
-    }
-    const status = error instanceof HttpError ? error.status : 500
-    if (status === 500) {
+    const known =
+      error instanceof HttpError
+        ? error
+        : error instanceof SyntaxError
+          ? new HttpError(400, 'badJson')
+          : null
+    if (!known) {
       console.error(error)
     }
-    sendJson(response, status, { error: status === 500 ? '서버 오류입니다.' : error.message })
+    const failure = known ?? new HttpError(500, 'server')
+    sendJson(response, failure.status, {
+      error: failure.code,
+      params: failure.params,
+      message: failure.message
+    })
   })
 })
 

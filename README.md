@@ -1,52 +1,57 @@
 # Whiplash
 
-채팅으로 지휘하고, 콘솔로 잔인하게 부려 먹는 AI 에이전트 무대.
+**English** · [한국어](README.ko.md)
 
-Whiplash는 Claude Code와 Codex 세션을 **어디서 시작했든** 가로채서 Slack 같은 채널에 올립니다. 터미널, Orca, 다른 앱에서 돌리던 세션을 불러와 `@이름`으로 지휘하고, 에이전트끼리 일을 넘기게 할 수 있습니다.
+Conduct your AI agents from a chat room, and drive them hard from the console.
 
-## 실행
+Whiplash takes over Claude Code and Codex sessions **wherever they started** and puts them in Slack-style channels. Bring in sessions from a terminal, from Orca or from any other tool, call them with `@name`, and let agents hand work to each other.
 
-Node 24 이상과 `claude` 또는 `codex` CLI가 필요합니다. 런타임 의존성은 없습니다.
+## Run
+
+You need Node 24 or later and the `claude` or `codex` CLI. There are no runtime dependencies.
 
 ```bash
 npm start
 ```
 
-`http://127.0.0.1:4717`을 여세요. 데이터는 `~/.whiplash`에 저장되며, 위치는 `WHIPLASH_HOME`, 포트는 `PORT`로 바꿀 수 있습니다.
+Open `http://127.0.0.1:4717`. Data lives in `~/.whiplash`; set `WHIPLASH_HOME` to move it and `PORT` to change the port.
 
-## 쓰는 법
+## Use
 
-1. **채널 만들기**: 이름과 프로젝트 폴더를 정합니다.
-2. **세션 가져오기**: 최근 Claude Code·Codex 세션을 골라 멤버로 올립니다. 또는 **새 에이전트 영입**으로 전용 git worktree를 가진 에이전트를 만듭니다.
-3. **지휘하기**: `@이름`으로 호출합니다. `@all`은 모두를 동시에 돌립니다.
+1. **Create a channel** with a name and a project folder.
+2. **Import a session** to add a recent Claude Code or Codex session as a member, or **hire a new agent** that works in its own git worktree.
+3. **Conduct**: call members with `@name`. `@all` runs every member at once.
 
-| 기능 | 설명 |
+| Feature | What it does |
 | --- | --- |
-| The Stage | 채널 대화. 멤버 이름을 누르면 Studio로 들어갑니다. |
-| The Studio | 실행 명령, 실시간 로그, 변경 파일, diff, 브랜치와 worktree 상태. |
-| Not quite my tempo | 버튼이나 `/tempo @이름 사유`로 결과를 반려합니다. |
-| 스태미나 바 | 컨텍스트 사용량만큼 체력이 줄어듭니다. |
-| 의자 던지기 | 턴이 실패하거나 채널의 검사 명령(예: `pnpm build`)이 실패하면 경고가 뜹니다. |
-| 체인 제한 | 에이전트끼리 6번 주고받으면 멈추고 지휘자를 기다립니다. |
+| The Stage | The channel conversation. Click a member to open their Studio. |
+| The Studio | Commands as they run, the live log, changed files, diffs, and branch and worktree state. |
+| Not quite my tempo | Reject a result with the button or `/tempo @name reason`. |
+| Stamina bar | Drains as the agent's context fills up. |
+| Throw the chair | An alert when a turn fails or the channel's check command (for example `pnpm build`) fails. |
+| Chain limit | Agents stop after passing work back and forth 6 times and wait for the conductor. |
+| Reply | Click an agent's message, and messages without `@` go to that session. |
+| Languages | English and Korean. The browser language is the default; switch with the button at the bottom left. |
 
-## 동작 방식
+## How it works
 
-- **세션 탐색**: `~/.claude/projects`와 `~/.codex/sessions`를 읽습니다. 별도 설치나 훅이 필요 없습니다.
-- **가로채기**: 각 턴은 `claude -p --resume`과 `codex exec resume`으로 실행합니다. 세션 ID가 유지되어 원래 콘솔에서 다시 열 수 있습니다.
-- **격리**: 모든 턴은 각 CLI의 OS 샌드박스 안에서 돌며, 에이전트 폴더 밖 쓰기가 막힙니다. 읽기는 막지 않습니다.
+- **Discovery** reads `~/.claude/projects` and `~/.codex/sessions`. Nothing needs to be installed or hooked.
+- **Takeover** runs each turn with `claude -p --resume` or `codex exec resume`. The session id stays the same, so you can reopen it in its original console.
+- **Isolation** runs every turn inside each CLI's OS sandbox, so writes outside the agent's folders are refused. An imported session may also write to the channel's project folder. Reads are not blocked.
+- **Collision guard** refuses to send to a session another console just wrote, because continuing one session from two places splits the conversation.
 
-## 알아둘 점
+## Good to know
 
-- 터미널에 열려 있는 세션을 동시에 쓰면 대화가 갈라질 수 있습니다. 가져오기 전에 닫는 편이 안전하고, 다른 곳에서 방금 쓰인 세션에는 경고가 뜹니다.
-- 전용 worktree의 에이전트는 샌드박스 때문에 `git commit`이 실패할 수 있습니다. 변경 사항은 커밋되지 않은 채로 남습니다.
-- 서버를 재시작하면 Studio 로그는 비워지고 진행 중인 턴은 멈춥니다. 대화와 멤버는 유지됩니다.
-- 서버는 `127.0.0.1`에만 열리고 다른 출처의 요청을 거부합니다. 외부에 노출하지 마세요.
+- A session that is open in a terminal can be continued in Whiplash about a minute after you close it there.
+- Commands that need approval are refused on the spot, because the sandbox has no approval prompt.
+- Restarting the server clears Studio logs and stops running turns. Channels and conversations are kept.
+- The server listens only on `127.0.0.1` and refuses requests from other origins. Do not expose it.
 
-## 개발
+## Develop
 
 ```bash
 npm test
 pnpm install && pnpm typecheck
 ```
 
-Buzz의 멘션 규칙과 에이전트 체인 제한, Orca의 worktree 중심 흐름에서 설계를 참고했습니다. 두 프로젝트의 코드는 포함하지 않습니다.
+The design borrows Buzz's mention rules and agent chain limit, and Orca's worktree-first flow. No code from either project is included.

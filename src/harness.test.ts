@@ -23,6 +23,16 @@ describe('buildCommand', () => {
   })
 })
 
+describe('writable roots', () => {
+  it('extends each sandbox to the listed folders', () => {
+    const claude = buildCommand({ harness: 'claude', sessionId: 's', writableRoots: ['/p'] }, 'hi').args
+    assert.deepEqual(claude.slice(-4), ['--add-dir', '/p', '--resume', 's'])
+    const codex = buildCommand({ harness: 'codex', sessionId: 's', writableRoots: ['/p'] }, 'hi').args
+    assert.ok(codex.includes('sandbox_workspace_write.writable_roots=["/p"]'))
+    assert.deepEqual(codex.slice(-2), ['s', 'hi'])
+  })
+})
+
 describe('parseStreamLine', () => {
   it('reads Claude session, tool use, tool errors, replies and failures', () => {
     assert.equal(

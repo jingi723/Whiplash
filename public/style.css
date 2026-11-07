@@ -280,6 +280,57 @@ button.who:hover {
   color: var(--red);
 }
 
+.tempo + .tempo {
+  margin-left: 0;
+}
+
+.reply:hover,
+.reply[aria-pressed='true'] {
+  border-color: var(--brass);
+  color: var(--brass);
+  opacity: 1;
+}
+
+.message.selectable {
+  cursor: pointer;
+}
+
+.message.targeted {
+  box-shadow: inset 3px 0 0 var(--brass);
+  background: var(--brass-soft);
+}
+
+.target {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+  padding: 4px 6px 4px 10px;
+  border-radius: 6px;
+  background: var(--brass-soft);
+  color: var(--brass);
+  font-size: 12px;
+}
+
+.target[hidden] {
+  display: none;
+}
+
+.target button {
+  padding: 0 6px;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: inherit;
+  font-size: 15px;
+  line-height: 1.2;
+}
+
+.target button:hover {
+  background: rgb(224 164 60 / 22%);
+}
+
 .body p {
   margin: 2px 0;
   white-space: pre-wrap;

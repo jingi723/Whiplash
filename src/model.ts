@@ -1,3 +1,14 @@
+import { createTranslator, LOCALES } from '../public/i18n.js'
+
+export type Locale = 'en' | 'ko'
+
+/** Agents and API clients read English; the browser re-renders notices in the viewer's language. */
+export const english = createTranslator('en')
+
+export function toLocale(value: unknown): Locale {
+  return LOCALES.includes(value as string) ? (value as Locale) : 'en'
+}
+
 /** Mention chains between agents stop here until a human speaks. */
 export const AGENT_CHAIN_LIMIT = 6
 /** One prompt carries at most this many unseen channel messages. */
@@ -16,6 +27,8 @@ export type Member = {
   harness: Harness
   instructions: string
   cwd: string
+  /** Folders outside `cwd` the sandbox lets this agent write; an imported session keeps its original cwd. */
+  writableRoots?: string[]
   /** Absent until the agent has a session; imported members start with one. */
   sessionId?: string
   contextTokens?: number
@@ -38,7 +51,11 @@ export type Message = {
   at: number
   /** Failed turns render as an alert with a reject action for this member. */
   alertMemberId?: string
+  /** A system notice the browser can translate; `text` keeps the English for agents. */
+  notice?: Notice
 }
+
+export type Notice = { key: string; params: Record<string, string | number> }
 
 export type Channel = {
   id: string
@@ -55,6 +72,11 @@ export type Channel = {
 }
 
 export type State = { channels: Channel[] }
+
+/** Where the member's work lands: the channel project for an imported session, its own folder otherwise. */
+export function projectFolder(member: Pick<Member, 'cwd' | 'writableRoots'>): string {
+  return member.writableRoots?.[0] ?? member.cwd
+}
 
 export function isValidMemberName(name: string): boolean {
   return /^[\p{L}\p{N}_-]+$/u.test(name) && name.toLowerCase() !== 'all'
@@ -105,8 +127,9 @@ export function parseTempoCommand(text: string): { name: string; reason: string 
   return match ? { name: match[1], reason: match[2].trim() } : null
 }
 
-export function tempoMessage(name: string, reason: string): string {
-  const base = `@${name} Not quite my tempo. 방금 결과는 반려다. 다시 짜와.`
+/** The reject is said by the conductor, so it uses the conductor's language. */
+export function tempoMessage(name: string, reason: string, locale: Locale = 'en'): string {
+  const base = createTranslator(locale)('tempo.reject', { name })
   return reason ? `${base} ${reason}` : base
 }
 
@@ -126,7 +149,8 @@ export function buildTurnPrompt(channel: Channel, member: Member): string {
   const fresh = !member.sessionId
   const roster = channel.members.map((other) => {
     const self = other.id === member.id ? ' (you)' : ''
-    return `- @${other.name}${self} (${other.harness}) folder: ${other.cwd}`
+    const folders = [other.cwd, ...(other.writableRoots ?? [])].join(', ')
+    return `- @${other.name}${self} (${other.harness}) folders: ${folders}`
   })
   const unseen = channel.messages
     .filter(
@@ -137,7 +161,7 @@ export function buildTurnPrompt(channel: Channel, member: Member): string {
     .slice(-PROMPT_CONTEXT_MESSAGES)
     .map((message) => `[${describeAuthor(message.author)}]\n${message.text}`)
   return [
-    `You are @${member.name} in the Whiplash channel #${channel.name}. Change files only in your own folder; read other members' folders when reviewing their work.`,
+    `You are @${member.name} in the Whiplash channel #${channel.name}. Change files only in your own folders; read other members' folders when reviewing their work.`,
     'Members:',
     ...roster,
     "To hand work to a member, write their @name in your reply. Don't @mention anyone for a bare acknowledgement.",

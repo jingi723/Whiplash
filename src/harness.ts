@@ -23,14 +23,15 @@ const CLAUDE_SANDBOX = JSON.stringify({
 })
 
 function clip(text: string): string {
-  return text.length > OUTPUT_LIMIT ? `${text.slice(0, OUTPUT_LIMIT)}\n… (잘림)` : text
+  return text.length > OUTPUT_LIMIT ? `${text.slice(0, OUTPUT_LIMIT)}\n… (truncated)` : text
 }
 
 /** Writes outside the agent's folder are refused by the OS sandbox of each CLI, even for imported sessions. */
 export function buildCommand(
-  member: Pick<Member, 'harness' | 'sessionId'>,
+  member: Pick<Member, 'harness' | 'sessionId' | 'writableRoots'>,
   prompt: string
 ): { command: string; args: string[] } {
+  const roots = member.writableRoots ?? []
   if (member.harness === 'claude') {
     return {
       command: 'claude',
@@ -44,15 +45,28 @@ export function buildCommand(
         'acceptEdits',
         '--settings',
         CLAUDE_SANDBOX,
+        ...roots.flatMap((root) => ['--add-dir', root]),
         ...(member.sessionId ? ['--resume', member.sessionId] : [])
       ]
     }
   }
+  const writableRoots = roots.length
+    ? ['-c', `sandbox_workspace_write.writable_roots=${JSON.stringify(roots)}`]
+    : []
   return {
     command: 'codex',
     args: member.sessionId
-      ? ['exec', 'resume', '--json', '-c', 'sandbox_mode="workspace-write"', member.sessionId, prompt]
-      : ['exec', '--json', '-s', 'workspace-write', prompt]
+      ? [
+          'exec',
+          'resume',
+          '--json',
+          '-c',
+          'sandbox_mode="workspace-write"',
+          ...writableRoots,
+          member.sessionId,
+          prompt
+        ]
+      : ['exec', '--json', '-s', 'workspace-write', ...writableRoots, prompt]
   }
 }
 
@@ -73,7 +87,7 @@ function toolResultText(content: unknown): string {
 
 function parseClaude(row: any): Parsed {
   if (row.type === 'system' && row.subtype === 'init') {
-    return { events: [{ kind: 'status', text: '세션 연결' }], sessionId: row.session_id }
+    return { events: [{ kind: 'status', text: 'connected' }], sessionId: row.session_id }
   }
   if (row.type === 'assistant') {
     return {
@@ -105,7 +119,7 @@ function parseClaude(row: any): Parsed {
   }
   if (row.type === 'result') {
     return row.is_error
-      ? { events: [], failure: String(row.result ?? row.subtype ?? '턴 실패') }
+      ? { events: [], failure: String(row.result ?? row.subtype ?? 'Turn failed') }
       : { events: [], reply: row.result ?? '', sessionId: row.session_id }
   }
   return { events: [] }
@@ -114,10 +128,10 @@ function parseClaude(row: any): Parsed {
 function parseCodex(row: any): Parsed {
   const item = row.item
   if (row.type === 'thread.started') {
-    return { events: [{ kind: 'status', text: '세션 연결' }], sessionId: row.thread_id }
+    return { events: [{ kind: 'status', text: 'connected' }], sessionId: row.thread_id }
   }
   if (row.type === 'turn.failed' || row.type === 'error') {
-    return { events: [], failure: String(row.error?.message ?? row.message ?? '턴 실패') }
+    return { events: [], failure: String(row.error?.message ?? row.message ?? 'Turn failed') }
   }
   if (row.type === 'item.started' && item?.type === 'command_execution') {
     return { events: [{ kind: 'command', text: item.command }] }

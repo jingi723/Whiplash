@@ -6,18 +6,22 @@ import {
   AGENT_CHAIN_LIMIT,
   buildTurnPrompt,
   CHANNEL_MESSAGE_LIMIT,
+  english,
   findMentions,
   parseTempoCommand,
   planHandoffs,
+  projectFolder,
   tempoMessage,
   type Author,
   type Channel,
+  type Locale,
   type Member,
+  type Notice,
   type State
 } from './model.ts'
 import type { TurnRead } from './transcript.ts'
 
-export type Activity = 'working' | 'queued'
+export type Activity = 'working' | 'checking'
 
 export type ConductorDeps = {
   state: State
@@ -29,7 +33,7 @@ export type ConductorDeps = {
   ) => Promise<TurnResult>
   /** Newest context numbers for a finished session, and when its transcript last changed. */
   readSession: (member: Member) => Promise<(TurnRead & { updatedAt: number }) | null>
-  runCheck: (command: string, cwd: string) => Promise<string | null>
+  runCheck: (command: string, cwd: string, signal: AbortSignal) => Promise<string | null>
   onChange: () => void
   onStudioEvent: (memberId: string, event: StudioEvent) => void
 }
@@ -40,9 +44,18 @@ const FOREIGN_ACTIVITY_MS = 60_000
 const OWN_WRITE_GRACE_MS = 3000
 
 /** Returns the failure output, or null when the command passes. */
-export async function runShellCheck(command: string, cwd: string): Promise<string | null> {
+export async function runShellCheck(
+  command: string,
+  cwd: string,
+  signal?: AbortSignal
+): Promise<string | null> {
   try {
-    await promisify(exec)(command, { cwd, timeout: CHECK_TIMEOUT_MS, maxBuffer: 8 * 1024 * 1024 })
+    await promisify(exec)(command, {
+      cwd,
+      signal,
+      timeout: CHECK_TIMEOUT_MS,
+      maxBuffer: 8 * 1024 * 1024
+    })
     return null
   } catch (error) {
     const { stdout = '', stderr = '', message } = error as NodeJS.ErrnoException & {
@@ -62,15 +75,13 @@ export function createConductor(deps: ConductorDeps) {
   const channelOf = (memberId: string): Channel | undefined =>
     state.channels.find(({ members }) => members.some(({ id }) => id === memberId))
 
-  function append(channel: Channel, author: Author, text: string, alertMemberId?: string): void {
-    channel.messages.push({
-      id: randomUUID(),
-      seq: channel.nextSeq++,
-      author,
-      text,
-      at: Date.now(),
-      ...(alertMemberId ? { alertMemberId } : {})
-    })
+  function append(
+    channel: Channel,
+    author: Author,
+    text: string,
+    extra: { alertMemberId?: string; notice?: Notice } = {}
+  ): void {
+    channel.messages.push({ id: randomUUID(), seq: channel.nextSeq++, author, text, at: Date.now(), ...extra })
     channel.messages.splice(0, channel.messages.length - CHANNEL_MESSAGE_LIMIT)
     deps.onChange()
   }
@@ -84,13 +95,11 @@ export function createConductor(deps: ConductorDeps) {
     deps.onChange()
   }
 
-  function alert(channel: Channel, member: Member, detail: string): void {
-    append(
-      channel,
-      { kind: 'system' },
-      `[System] ${member.name}가 박자를 놓쳤습니다. 의자를 던지세요.\n${detail}`,
-      member.id
-    )
+  function notify(channel: Channel, key: string, params: Notice['params'], alertMemberId?: string): void {
+    append(channel, { kind: 'system' }, english(`notices.${key}`, params), {
+      notice: { key, params },
+      ...(alertMemberId ? { alertMemberId } : {})
+    })
   }
 
   /** A mention that landed before the prompt was built is already answered. */
@@ -106,7 +115,7 @@ export function createConductor(deps: ConductorDeps) {
   function requestTurn(channel: Channel, member: Member): void {
     if (running.has(member.id)) {
       pending.add(member.id)
-      setActivity(member.id, 'queued')
+      deps.onChange()
       return
     }
     const controller = new AbortController()
@@ -121,16 +130,15 @@ export function createConductor(deps: ConductorDeps) {
     })
   }
 
-  async function warnIfUsedElsewhere(channel: Channel, member: Member): Promise<void> {
+  /** Resuming a session another console is writing would split its conversation, so the turn is refused. */
+  async function isUsedElsewhere(member: Member): Promise<boolean> {
     const session = member.sessionId ? await deps.readSession(member) : null
     const quietUntil = (member.lastTurnEndedAt ?? 0) + OWN_WRITE_GRACE_MS
-    if (session && Date.now() - session.updatedAt < FOREIGN_ACTIVITY_MS && session.updatedAt > quietUntil) {
-      append(
-        channel,
-        { kind: 'system' },
-        `[System] @${member.name} 세션이 방금 다른 콘솔에서 쓰였습니다. 그쪽에 열려 있다면 대화가 갈라질 수 있습니다.`
-      )
-    }
+    return Boolean(
+      session &&
+        Date.now() - session.updatedAt < FOREIGN_ACTIVITY_MS &&
+        session.updatedAt > quietUntil
+    )
   }
 
   async function playTurn(
@@ -138,7 +146,10 @@ export function createConductor(deps: ConductorDeps) {
     member: Member,
     controller: AbortController
   ): Promise<void> {
-    await warnIfUsedElsewhere(channel, member)
+    if (await isUsedElsewhere(member)) {
+      notify(channel, 'busyElsewhere', { name: member.name })
+      return
+    }
     const prompt = buildTurnPrompt(channel, member)
     member.deliveredThrough = channel.nextSeq - 1
     const result = await deps.runTurn(
@@ -150,7 +161,7 @@ export function createConductor(deps: ConductorDeps) {
     member.sessionId = result.sessionId ?? member.sessionId
     member.lastTurnEndedAt = Date.now()
     if (controller.signal.aborted) {
-      append(channel, { kind: 'system' }, `[System] @${member.name} 턴을 멈췄습니다.`)
+      notify(channel, 'turnStopped', { name: member.name })
       return
     }
     if (result.text) {
@@ -160,13 +171,27 @@ export function createConductor(deps: ConductorDeps) {
     member.contextTokens = session?.contextTokens ?? member.contextTokens
     member.windowTokens = session?.windowTokens ?? member.windowTokens
     if (!result.ok) {
-      alert(channel, member, result.error ?? '턴이 실패했습니다.')
+      notify(channel, 'turnFailed', { name: member.name, error: result.error ?? 'Turn failed' }, member.id)
       return
     }
     if (channel.checkCommand) {
-      const failure = await deps.runCheck(channel.checkCommand, member.cwd)
+      setActivity(member.id, 'checking')
+      const failure = await deps.runCheck(
+        channel.checkCommand,
+        projectFolder(member),
+        controller.signal
+      )
+      if (controller.signal.aborted) {
+        notify(channel, 'checkStopped', { name: member.name })
+        return
+      }
       if (failure) {
-        alert(channel, member, `검사 실패: ${channel.checkCommand}\n${failure}`)
+        notify(
+          channel,
+          'checkFailed',
+          { name: member.name, command: channel.checkCommand, output: failure },
+          member.id
+        )
         return
       }
     }
@@ -176,11 +201,7 @@ export function createConductor(deps: ConductorDeps) {
   function handOff(channel: Channel, member: Member, reply: string): void {
     const { names, chainBroken } = planHandoffs(channel, member.name, reply)
     if (chainBroken) {
-      append(
-        channel,
-        { kind: 'system' },
-        `[System] 에이전트끼리 ${AGENT_CHAIN_LIMIT}번 주고받아 체인을 끊었습니다. 지휘자가 다시 지시해야 이어갑니다.`
-      )
+      notify(channel, 'chainBroken', { limit: AGENT_CHAIN_LIMIT })
     }
     if (names.length > 0) {
       channel.agentChain += 1
@@ -197,9 +218,9 @@ export function createConductor(deps: ConductorDeps) {
     }
   }
 
-  function sendHumanMessage(channel: Channel, text: string): void {
+  function sendHumanMessage(channel: Channel, text: string, locale: Locale = 'en'): void {
     const tempo = parseTempoCommand(text)
-    const body = tempo ? tempoMessage(tempo.name, tempo.reason) : text
+    const body = tempo ? tempoMessage(tempo.name, tempo.reason, locale) : text
     channel.agentChain = 0
     append(channel, { kind: 'human' }, body)
     const mentioned = findMentions(
@@ -207,7 +228,7 @@ export function createConductor(deps: ConductorDeps) {
       channel.members.map(({ name }) => name)
     )
     if (tempo && mentioned.length === 0) {
-      append(channel, { kind: 'system' }, `[System] @${tempo.name} 멤버를 찾을 수 없습니다.`)
+      notify(channel, 'unknownMember', { name: tempo.name })
     }
     wake(channel, mentioned)
   }
@@ -216,11 +237,12 @@ export function createConductor(deps: ConductorDeps) {
     sendHumanMessage,
     channelOf,
     activityOf: (): Record<string, Activity> => Object.fromEntries(activity),
-    reject(memberId: string): void {
+    queuedOf: (): string[] => [...pending],
+    reject(memberId: string, locale: Locale = 'en'): void {
       const channel = channelOf(memberId)
       const member = channel?.members.find(({ id }) => id === memberId)
       if (channel && member) {
-        sendHumanMessage(channel, tempoMessage(member.name, ''))
+        sendHumanMessage(channel, tempoMessage(member.name, '', locale), locale)
       }
     },
     stop(memberId: string): void {

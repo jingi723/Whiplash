@@ -56,6 +56,8 @@ function conduct(state: State, runTurn: RunTurn, overrides: Partial<ConductorDep
 }
 
 const texts = (state: State): string[] => state.channels[0].messages.map(({ text }) => text)
+const notices = (state: State): (string | undefined)[] =>
+  state.channels[0].messages.map(({ notice }) => notice?.key)
 
 describe('conductor', () => {
   it('runs one turn at a time per agent and carries later mentions into the next prompt', async () => {
@@ -105,7 +107,7 @@ describe('conductor', () => {
     conductor.sendHumanMessage(channel, '@Coder 시작')
     await done
     assert.equal(turns, 7)
-    assert.ok(texts(state).at(-1)?.includes('체인을 끊었습니다'))
+    assert.equal(notices(state).at(-1), 'chainBroken')
     conductor.sendHumanMessage(channel, '여기까지')
     assert.equal(channel.agentChain, 0)
   })
@@ -120,7 +122,8 @@ describe('conductor', () => {
     await done
     const alert = channel.messages.at(-1)
     assert.equal(alert?.alertMemberId, 'a')
-    assert.ok(alert?.text.includes('의자를 던지세요'))
+    assert.deepEqual(alert?.notice, { key: 'turnFailed', params: { name: 'Coder', error: '터짐' } })
+    assert.ok(alert?.text.includes('Throw the chair'))
     done = idle()
     conductor.reject('a')
     await done
@@ -147,22 +150,55 @@ describe('conductor', () => {
     assert.ok(texts(state).at(-1)?.includes('TS2322'))
   })
 
-  it('warns when the session moved in another console, but not for its own writes', async () => {
+  it('refuses a session another console just wrote, but not after its own turns', async () => {
     const state = room()
     const channel = state.channels[0]
     channel.members[0].sessionId = 's'
-    const { conductor, idle } = conduct(state, async () => ({ ok: true, text: '끝' }), {
-      readSession: async () => ({ text: '', updatedAt: Date.now() })
-    })
+    let turns = 0
+    let updatedAt = Date.now()
+    const { conductor, idle } = conduct(
+      state,
+      async () => {
+        turns += 1
+        return { ok: true, text: '끝' }
+      },
+      { readSession: async () => ({ text: '', updatedAt }) }
+    )
     let done = idle()
     conductor.sendHumanMessage(channel, '@Coder 해')
     await done
-    assert.ok(texts(state).some((text) => text.includes('다른 콘솔')))
-    const warnings = texts(state).filter((text) => text.includes('다른 콘솔')).length
+    assert.equal(turns, 0)
+    assert.equal(notices(state).at(-1), 'busyElsewhere')
+    updatedAt = Date.now() - 120_000
+    done = idle()
+    conductor.sendHumanMessage(channel, '@Coder 다시')
+    await done
+    assert.equal(turns, 1)
+    updatedAt = Date.now()
     done = idle()
     conductor.sendHumanMessage(channel, '@Coder 또')
     await done
-    assert.equal(texts(state).filter((text) => text.includes('다른 콘솔')).length, warnings)
+    assert.equal(turns, 2)
+  })
+
+  it('checks the project folder of an imported session, shows it, and stop cancels it', async () => {
+    const state = room({ checkCommand: 'npm test' })
+    const channel = state.channels[0]
+    channel.members[0].writableRoots = ['/project']
+    const seen: { cwd: string; activity: string | undefined }[] = []
+    const { conductor, idle } = conduct(state, async () => ({ ok: true, text: '끝' }), {
+      runCheck: (_command, cwd, signal) => {
+        seen.push({ cwd, activity: conductor.activityOf().a })
+        setTimeout(() => conductor.stop('a'), 5)
+        return new Promise((resolve) => signal.addEventListener('abort', () => resolve('killed')))
+      }
+    })
+    const done = idle()
+    conductor.sendHumanMessage(channel, '@Coder 해')
+    await done
+    assert.deepEqual(seen, [{ cwd: '/project', activity: 'checking' }])
+    assert.equal(notices(state).at(-1), 'checkStopped')
+    assert.ok(!channel.messages.some(({ alertMemberId }) => alertMemberId))
   })
 
   it('stops a running turn without an alert', async () => {
@@ -177,8 +213,22 @@ describe('conductor', () => {
     conductor.sendHumanMessage(channel, '@Coder 해')
     setTimeout(() => conductor.stop('a'), 5)
     await done
-    assert.ok(texts(state).at(-1)?.includes('멈췄습니다'))
+    assert.equal(notices(state).at(-1), 'turnStopped')
     assert.ok(!channel.messages.some(({ alertMemberId }) => alertMemberId))
+  })
+})
+
+describe('conductor language', () => {
+  it("rejects in the conductor's language while notices stay English for agents", async () => {
+    const state = room()
+    const { conductor, idle } = conduct(state, async () => ({ ok: true, text: '' }))
+    const done = idle()
+    conductor.reject('a', 'ko')
+    await done
+    assert.ok(texts(state).includes('@Coder Not quite my tempo. 방금 결과는 반려다. 다시 짜와.'))
+    conductor.sendHumanMessage(state.channels[0], '/tempo @Nobody', 'ko')
+    assert.equal(texts(state).at(-1), '[System] There is no member called @Nobody.')
+    assert.equal(texts(state).at(-2), '@Nobody Not quite my tempo. 방금 결과는 반려다. 다시 짜와.')
   })
 })
 
