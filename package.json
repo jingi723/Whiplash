@@ -9,12 +9,16 @@
   },
   "scripts": {
     "start": "node src/server.ts",
-    "test": "node --test \"src/**/*.test.ts\" \"public/**/*.test.js\"",
+    "desktop": "electron .",
+    "dist": "electron-builder --mac",
+    "test": "node --test \"src/**/*.test.ts\" \"public/**/*.test.js\" \"desktop/**/*.test.ts\"",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
     "@types/node": "^26.6.6",
     "@types/proper-lockfile": "4.1.4",
+    "electron": "43.8.6",
+    "electron-builder": "26.15.3",
     "typescript": "^7.0.2"
   },
   "dependencies": {
@@ -24,5 +28,36 @@
     "@xterm/xterm": "6.0.0",
     "node-pty": "1.1.0",
     "proper-lockfile": "4.1.2"
+  },
+  "main": "desktop/main.cjs",
+  "build": {
+    "appId": "com.jingi723.whiplash",
+    "productName": "Whiplash",
+    "directories": {
+      "buildResources": "build",
+      "output": "dist.noindex"
+    },
+    "files": [
+      "desktop/**",
+      "src/**",
+      "!src/**/*.test.ts",
+      "!src/orca/vitest.ts",
+      "public/**",
+      "!public/**/*.test.js",
+      "package.json"
+    ],
+    "asar": false,
+    "npmRebuild": false,
+    "publish": null,
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "icon": "build/icon.icns",
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "identity": "-",
+      "hardenedRuntime": false
+    }
   }
 }

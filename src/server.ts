@@ -1,3 +1,4 @@
+import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { existsSync, statSync } from 'node:fs'
 import { readFile, stat } from 'node:fs/promises'
@@ -5,7 +6,8 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { dirname, extname, join, normalize, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createConductor, runShellCheck } from './conductor.ts'
-import { createWorktree, fileDiff, gitInfo } from './git.ts'
+import { createWorktree, fileDiff, gitInfo, listFiles, readLog, readProjectFile, resolveInside, searchProject, showCommit } from './git.ts'
+import { claudeAccount, codexAccount } from './accounts.ts'
 import { runTurn, type StudioEvent } from './harness.ts'
 import {
   english,
@@ -275,7 +277,7 @@ async function handleApi(
     return openEventStream(request, response)
   }
   if (route === 'GET /api/usage') {
-    return sendJson(response, 200, await readUsage())
+    return sendJson(response, 200, await readUsage(url.searchParams.has('force')))
   }
   if (route === 'GET /api/terminal-appearance') {
     return sendJson(response, 200, await readOrcaTerminalAppearance())
@@ -287,20 +289,22 @@ async function handleApi(
     const sessions = (await listSessions()).filter(({ id: sessionId }) => !taken.has(sessionId))
     return sendJson(response, 200, { sessions })
   }
+  if (route === 'GET /api/accounts') {
+    const [claude, codex] = await Promise.all([claudeAccount(), codexAccount()])
+    return sendJson(response, 200, { claude, codex })
+  }
   if (request.method === 'GET' && parts[1] === 'members' && parts[3] === 'studio') {
-    const { member } = memberById(id)
-    return sendJson(response, 200, { log: logs.get(id) ?? [], git: await gitInfo(projectFolder(member)) })
+    memberById(id)
+    return sendJson(response, 200, { log: logs.get(id) ?? [] })
   }
   if (request.method === 'GET' && parts[1] === 'members' && parts[3] === 'terminal') {
     memberById(id)
     return openTerminalStream(request, response, id)
   }
-  if (request.method === 'GET' && parts[1] === 'members' && parts[3] === 'diff') {
-    const { member } = memberById(id)
-    const diff = await fileDiff(projectFolder(member), url.searchParams.get('path') ?? '').catch(() => {
-      throw new HttpError(400, 'notChanged')
-    })
-    return sendJson(response, 200, { diff })
+  if (request.method === 'GET' && (parts[1] === 'channels' || parts[1] === 'members') && parts[3]) {
+    // The side panels look at the folder the open tab works in: the channel's, or the agent's own.
+    const folder = parts[1] === 'channels' ? channelById(id).cwd : projectFolder(memberById(id).member)
+    return sendJson(response, 200, await readFolder(folder, parts[3], url.searchParams))
   }
   if (request.method !== 'POST') {
     throw new HttpError(404, 'notFound')
@@ -370,6 +374,17 @@ async function handleApi(
     }
     return sendJson(response, 200, {})
   }
+  if ((parts[1] === 'channels' || parts[1] === 'members') && parts[3] === 'reveal') {
+    const folder = parts[1] === 'channels' ? channelById(id).cwd : projectFolder(memberById(id).member)
+    const path = typeof body.path === 'string' && body.path ? body.path : ''
+    const target = path
+      ? await resolveInside(folder, path).catch(() => {
+          throw new HttpError(404, 'notFound')
+        })
+      : folder
+    revealInFileManager(target)
+    return sendJson(response, 200, {})
+  }
   if (parts[1] === 'members' && parts[3] === 'remove') {
     const { channel } = memberById(id)
     conductor.stop(id)
@@ -377,6 +392,43 @@ async function handleApi(
     channel.members = channel.members.filter((member) => member.id !== id)
     publishState()
     return sendJson(response, 200, {})
+  }
+  throw new HttpError(404, 'notFound')
+}
+
+/** Orca's "Reveal in Finder": select the item in the platform's file manager. */
+function revealInFileManager(target: string): void {
+  const [command, args] =
+    process.platform === 'darwin'
+      ? ['open', ['-R', target]]
+      : process.platform === 'win32'
+        ? ['explorer.exe', [`/select,${target}`]]
+        : ['xdg-open', [dirname(target)]]
+  spawn(command, args, { detached: true, stdio: 'ignore' }).on('error', () => {}).unref()
+}
+
+async function readFolder(folder: string, view: string, params: URLSearchParams): Promise<unknown> {
+  const path = params.get('path') ?? ''
+  if (view === 'git') return { folder, git: await gitInfo(folder) }
+  if (view === 'files') return { folder, ...(await listFiles(folder)) }
+  if (view === 'search') return searchProject(folder, params.get('q') ?? '')
+  if (view === 'log') return { commits: await readLog(folder) }
+  if (view === 'file') {
+    return readProjectFile(folder, path).catch(() => {
+      throw new HttpError(404, 'notFound')
+    })
+  }
+  if (view === 'diff') {
+    const diff = await fileDiff(folder, path).catch(() => {
+      throw new HttpError(400, 'notChanged')
+    })
+    return { diff }
+  }
+  if (view === 'commit') {
+    const text = await showCommit(folder, params.get('sha') ?? '').catch(() => {
+      throw new HttpError(404, 'notFound')
+    })
+    return { text }
   }
   throw new HttpError(404, 'notFound')
 }

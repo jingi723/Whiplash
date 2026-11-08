@@ -17,11 +17,20 @@ npm start
 
 Open `http://127.0.0.1:4717`. Data lives in `~/.whiplash`; set `WHIPLASH_HOME` to move it and `PORT` to change the port.
 
+### Desktop app
+
+```bash
+pnpm desktop   # run the Electron app from source
+pnpm dist      # build dist.noindex/Whiplash-<version>-arm64.dmg (ad-hoc signed, not notarized)
+```
+
+The app runs the same server on Electron's own Node, so it needs no system Node. If a Whiplash server is already on port 4717 the app uses it instead of starting a second one. Launched from Finder or the Dock, it reads `PATH` from your login shell so `claude` and `codex` are found. The build is not notarized: if macOS warns on first open, right-click the app and choose Open.
+
 ## Use
 
 1. **Create a channel** with a name and a project folder.
 2. **Import a session** to add a recent Claude Code or Codex session as a member, or **hire a new agent** that works in its own git worktree.
-3. **Conduct**: call members with `@name`. `@all` runs every member at once.
+3. **Command**: call members with `@name`. `@all` runs every member at once.
 
 | Feature | What it does |
 | --- | --- |
@@ -30,7 +39,7 @@ Open `http://127.0.0.1:4717`. Data lives in `~/.whiplash`; set `WHIPLASH_HOME` t
 | Not quite my tempo | Reject a result with the button or `/tempo @name reason`. |
 | Stamina bar | Drains as the agent's context fills up. |
 | Throw the chair | An alert when a turn fails or the channel's check command (for example `pnpm build`) fails. |
-| Chain limit | Agents stop after passing work back and forth 6 times and wait for the conductor. |
+| Chain limit | Agents stop after passing work back and forth 6 times and wait for the master. |
 | Reply | Click an agent's message, and messages without `@` go to that session. |
 | Plan limits | Claude and Codex 5-hour and weekly usage with reset times, at the bottom of the left rail. |
 | Languages | English and Korean. The browser language is the default; switch with the button at the bottom left. |

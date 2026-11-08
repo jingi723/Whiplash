@@ -2,6 +2,13 @@
 import { addressTo } from './compose.js'
 import { createTranslator, pickLocale } from './i18n.js'
 import { colorMode, measure, mountTerminal, terminalTheme } from './terminal.js'
+import { formatResetDuration } from './orca/rate-limit-reset-format.js'
+import { formatRateLimitWindowChipLabel, formatWindowLabel } from './orca/rate-limit-window-label.js'
+import { barColor, clampUsedPercent } from './orca/usage-bar.js'
+import { icon, providerIcon } from './icons.js'
+
+// In the desktop app the macOS window controls float over the rail, as in Orca.
+if (window.whiplashDesktop?.platform === 'darwin') document.documentElement.classList.add('desktop-mac')
 
 const LOW_STAMINA = 25
 const DEFAULT_WINDOW = 200_000
@@ -19,7 +26,8 @@ const ui = {
   replyTo: {},
   replyMessage: {},
   channelId: null,
-  studioId: null
+  view: 'app',
+  tabs: {}
 }
 const main = document.querySelector('#main')
 const channelNav = document.querySelector('#channels')
@@ -40,6 +48,14 @@ function writeStored(key, value) {
     localStorage.setItem(key, value)
   } catch {
     // Private windows can refuse storage; the choice then lasts for this page only.
+  }
+}
+
+function readJson(key, fallback) {
+  try {
+    return JSON.parse(readStored(key)) ?? fallback
+  } catch {
+    return fallback
   }
 }
 
@@ -72,71 +88,277 @@ function setLocale(next) {
   }
   applyStaticText()
   if (shell) shell.messageIds = []
+  settingsDirty = true
+  panelKey = ''
   render()
 }
 
 const USAGE_REFRESH_MS = 120_000
+const USAGE_TICK_MS = 60_000
 let usage = null
 
-function resetLabel(resetsAt) {
-  if (!resetsAt) return ''
-  const date = new Date(resetsAt)
-  const sameDay = date.toDateString() === new Date().toDateString()
-  const when = sameDay
-    ? date.toLocaleTimeString(locale, { hour: 'numeric', minute: '2-digit' })
-    : date.toLocaleDateString(locale, { weekday: 'short', hour: 'numeric', minute: '2-digit' })
-  return t('usage.resets', { when })
+function usageBar(percent, wide = false) {
+  const fill = h('div', { class: barColor(percent) })
+  fill.style.width = `${percent}%`
+  return h('div', { class: `usage-bar${wide ? ' wide' : ''}`, role: 'meter', 'aria-valuemin': 0, 'aria-valuemax': 100, 'aria-valuenow': percent }, fill)
 }
 
-function usageRow(label, window) {
-  const percent = Math.round(window.usedPercent)
-  const fill = h('div')
-  fill.style.width = `${percent}%`
+function resetText(window) {
+  if (!window.resetsAt) return ''
+  const duration = formatResetDuration(window.resetsAt - Date.now())
+  return duration === 'now' ? t('usage.resetsNow') : t('usage.resetsIn', { duration })
+}
+
+// --- Usage: Orca's status-bar trigger and its usage roster popover (UsageRosterPanel.tsx).
+const USAGE_MODE_KEY = 'whiplash.usageMode'
+let usageMode = readStored(USAGE_MODE_KEY) === 'compact' ? 'compact' : 'verbose'
+const PROVIDERS = [
+  ['claude', 'Claude'],
+  ['codex', 'Codex']
+]
+
+// Fable keeps its model name so two weekly windows never both read "wk".
+function usageSections(data) {
+  return [
+    [data?.session, null],
+    [data?.weekly, null],
+    [data?.fable, 'Fable']
+  ]
+    .filter(([window]) => window)
+    .map(([window, name]) => ({ window, name }))
+}
+
+const sectionLabel = (section, countdown) =>
+  section.name ?? (countdown ? formatRateLimitWindowChipLabel(section.window) : formatWindowLabel(section.window.windowMinutes))
+const usedOf = (section) => clampUsedPercent(section.window.usedPercent)
+const maxUsed = (sections) => Math.max(0, ...sections.map(usedOf))
+const tightestOf = (sections) => sections.reduce((a, b) => (usedOf(b) > usedOf(a) ? b : a))
+const planLabel = (plan) =>
+  plan
+    ?.split(/[\s_-]+/)
+    .filter(Boolean)
+    .map((word) => word[0].toUpperCase() + word.slice(1).toLowerCase())
+    .join(' ')
+const usageTone = (used) => (used >= 80 ? ' urgent' : used >= 60 ? ' warning' : '')
+
+function usageStatus(data) {
+  return data?.error === 'signedOut' ? t('usage.signedOut') : data?.error ? t('usage.unavailable') : t('usage.idle')
+}
+
+function usageMetric(section, label, showBar = true) {
+  const used = usedOf(section)
+  return h(
+    'span',
+    { class: 'usage-metric' },
+    h('span', { class: 'metric-label' }, label),
+    showBar && usageBar(used),
+    h('span', { class: `metric-value${usageTone(used)}` }, `${used}%`)
+  )
+}
+
+function openAccounts() {
+  document.querySelector('#usage-panel')?.hidePopover()
+  settingsSection = 'accounts'
+  settingsDirty = true
+  if (location.hash === '#/settings') render()
+  else location.hash = '#/settings'
+}
+
+function usageTrigger() {
+  return h(
+    'button',
+    { class: 'usage-trigger', type: 'button', popovertarget: 'usage-panel', 'aria-label': t('usage.title') },
+    ...PROVIDERS.map(([id, name]) => {
+      const sections = usageSections(usage[id])
+      let detail
+      if (sections.length === 0) detail = [h('span', { class: 'muted' }, '—')]
+      else if (usageMode === 'compact') detail = [h('span', {}, `${usedOf(tightestOf(sections))}%`)]
+      else
+        detail = [
+          usageBar(maxUsed(sections)),
+          h('span', {}, sections.map((section) => t('usage.chip', { percent: usedOf(section), label: sectionLabel(section, true) })).join(' · '))
+        ]
+      return h('span', { class: 'usage-chip', title: name }, providerIcon(id), ...detail)
+    })
+  )
+}
+
+function usagePanel() {
+  const link = (label) =>
+    h('button', { class: 'usage-link', type: 'button', onClick: openAccounts }, label, icon('chevron-right', 'icon chevron'))
+  const rows = PROVIDERS.map(([id, name]) => ({ id, name, data: usage[id], sections: usageSections(usage[id]) }))
+    .sort((a, b) => maxUsed(b.sections) - maxUsed(a.sections))
+    .map(({ id, name, data, sections }) => {
+      const plan = planLabel(data?.plan)
+      const soonest = sections.filter((section) => section.window.resetsAt).sort((a, b) => a.window.resetsAt - b.window.resetsAt)[0]
+      const tightest = sections.length ? tightestOf(sections) : null
+      return h(
+        'button',
+        { class: 'usage-row', type: 'button', onClick: openAccounts },
+        h(
+          'span',
+          { class: 'row-head' },
+          h('span', { class: 'provider-box' }, providerIcon(id)),
+          h('span', { class: 'provider-name' }, name, plan && h('span', { class: 'muted' }, ` · ${plan}`)),
+          !tightest
+            ? h('span', { class: 'small' }, usageStatus(data))
+            : usageMode === 'compact'
+              ? h('span', { class: 'push' }, usageMetric(tightest, sectionLabel(tightest, true), false))
+              : soonest && h('span', { class: 'small' }, resetText(soonest.window)),
+          icon('chevron-right', 'icon chevron')
+        ),
+        tightest && usageMode === 'verbose' && h('span', { class: 'row-metrics' }, ...sections.map((section) => usageMetric(section, sectionLabel(section, false))))
+      )
+    })
   return h(
     'div',
-    { class: 'usage-row' },
-    h('span', { class: 'usage-label' }, label, h('strong', {}, `${percent}%`)),
+    { id: 'usage-panel', popover: 'auto', class: 'usage-panel', 'aria-label': t('usage.title') },
     h(
       'div',
-      { class: `stamina${percent >= 100 - LOW_STAMINA ? ' low' : ''}`, role: 'meter', 'aria-label': label, 'aria-valuemin': 0, 'aria-valuemax': 100, 'aria-valuenow': percent },
-      fill
+      { class: 'usage-head' },
+      h('strong', {}, t('usage.title')),
+      h(
+        'span',
+        { class: 'usage-head-right' },
+        t('usage.allAgents'),
+        h('button', { class: 'icon-xs', type: 'button', title: t('usage.refresh'), 'aria-label': t('usage.refresh'), onClick: () => void refreshUsage(true) }, icon('refresh'))
+      )
     ),
-    h('span', { class: 'usage-reset' }, resetLabel(window.resetsAt))
+    h(
+      'div',
+      { class: 'usage-mode' },
+      segmented([['verbose', t('usage.detailed')], ['compact', t('usage.compact')]], usageMode, (mode) => {
+        usageMode = mode
+        writeStored(USAGE_MODE_KEY, mode)
+        renderUsage()
+      })
+    ),
+    h('div', { class: 'usage-sep' }),
+    ...rows,
+    h('div', { class: 'usage-sep' }),
+    link(t('usage.detailsHistory')),
+    link(t('usage.manageAccounts'))
   )
 }
 
 function renderUsage() {
   const box = document.querySelector('#usage')
-  if (!usage) {
-    box.replaceChildren()
-    return
-  }
-  const provider = (name, data) => {
-    const rows = [
-      data.session && usageRow(`${name} ${t('usage.session')}`, data.session),
-      data.weekly && usageRow(`${name} ${t('usage.weekly')}`, data.weekly)
-    ].filter(Boolean)
-    if (rows.length) return rows
-    const note = data.error === 'signedOut' ? t('usage.signedOut') : data.error ? t('usage.unavailable') : t('usage.idle')
-    return [h('div', { class: 'usage-row' }, h('span', { class: 'usage-label' }, name, h('span', { class: 'usage-reset' }, note)))]
-  }
-  box.replaceChildren(h('p', { class: 'label' }, t('usage.title')), ...provider('Claude', usage.claude), ...provider('Codex', usage.codex))
+  const open = Boolean(box.querySelector(':popover-open'))
+  box.replaceChildren(...(usage ? [usageTrigger(), usagePanel()] : []))
+  // Keep the popover open across the minute tick and refreshes.
+  if (open) document.getElementById('usage-panel')?.showPopover()
 }
 
-async function refreshUsage() {
-  usage = await api('usage').catch(() => usage)
+async function refreshUsage(force = false) {
+  usage = await api(force ? 'usage?force=1' : 'usage').catch(() => usage)
   renderUsage()
+}
+
+// --- Panels, as Orca does them: Mod+B and Mod+L toggle the sides, edges drag to resize, all remembered.
+// v2: Orca's default widths (280 left, 350 right) replace the narrower ones saved before.
+const PANELS_KEY = 'whiplash.panels.v2'
+const LEFT_WIDTH = { min: 220, max: 500 }
+const RIGHT_MIN = 220
+const appRoot = document.querySelector('#app')
+const panels = { left: true, right: true, leftWidth: 280, rightWidth: 350 }
+Object.assign(panels, readJson(PANELS_KEY, {}))
+
+const clamp = (value, { min, max }) => Math.min(max, Math.max(min, Math.round(value)))
+// Orca keeps the center at least 320px wide.
+const rightMax = () => Math.max(RIGHT_MIN, window.innerWidth - 320 - (panels.left ? clamp(panels.leftWidth, LEFT_WIDTH) : 0))
+
+function applyPanels() {
+  appRoot.classList.toggle('left-closed', !panels.left)
+  appRoot.classList.toggle('right-closed', !panels.right)
+  appRoot.style.setProperty('--left-w', `${clamp(panels.leftWidth, LEFT_WIDTH)}px`)
+  appRoot.style.setProperty('--right-w', `${clamp(panels.rightWidth, { min: RIGHT_MIN, max: rightMax() })}px`)
+  // The collapsed header floats over the tab strip, which keeps exactly its width free.
+  const header = document.querySelector('.titlebar-left')
+  appRoot.style.setProperty('--collapsed-header-w', panels.left ? '0px' : `${header.offsetWidth}px`)
+}
+
+function savePanels() {
+  writeStored(PANELS_KEY, JSON.stringify(panels))
+}
+
+function togglePanel(side) {
+  panels[side] = !panels[side]
+  savePanels()
+  applyPanels()
+  if (side === 'right' && panels.right) render()
+}
+
+for (const handle of document.querySelectorAll('.resizer')) {
+  handle.addEventListener('pointerdown', (event) => {
+    const side = handle.dataset.side
+    handle.setPointerCapture(event.pointerId)
+    appRoot.classList.add('resizing')
+    const move = (moveEvent) => {
+      if (side === 'left') panels.leftWidth = clamp(moveEvent.clientX, LEFT_WIDTH)
+      else panels.rightWidth = clamp(window.innerWidth - moveEvent.clientX, { min: RIGHT_MIN, max: rightMax() })
+      applyPanels()
+    }
+    const stop = () => {
+      handle.removeEventListener('pointermove', move)
+      appRoot.classList.remove('resizing')
+      savePanels()
+    }
+    handle.addEventListener('pointermove', move)
+    handle.addEventListener('pointerup', stop, { once: true })
+    handle.addEventListener('pointercancel', stop, { once: true })
+  })
+}
+window.addEventListener('resize', applyPanels)
+
+const isMac = navigator.platform.toUpperCase().includes('MAC')
+const MOD = isMac ? '⌘' : 'Ctrl'
+const SHORTCUTS = {
+  b: () => togglePanel('left'),
+  l: () => togglePanel('right'),
+  j: () => switchPalette(),
+  p: () => filePalette(),
+  ',': () => (location.hash = '#/settings')
+}
+// Capture phase, so the shortcuts still work while the terminal has focus.
+window.addEventListener(
+  'keydown',
+  (event) => {
+    const mod = isMac ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey
+    const action = mod && !event.shiftKey && !event.altKey && SHORTCUTS[event.key.toLowerCase()]
+    if (!action) return
+    event.preventDefault()
+    action()
+  },
+  { capture: true }
+)
+document.querySelector('#toggle-left').addEventListener('click', () => togglePanel('left'))
+document.querySelector('#toggle-right').addEventListener('click', () => togglePanel('right'))
+document.querySelector('#toggle-right-floating').addEventListener('click', () => togglePanel('right'))
+
+function labelButton(selector, label, iconName) {
+  const button = document.querySelector(selector)
+  button.replaceChildren(icon(iconName))
+  button.title = label
+  button.setAttribute('aria-label', label)
 }
 
 function applyStaticText() {
   document.documentElement.lang = locale
   document.querySelector('#channels-label').textContent = t('nav.channels')
-  document.querySelector('#channels').setAttribute('aria-label', t('nav.channels'))
-  document.querySelector('#new-channel').textContent = t('nav.newChannel')
-  document.querySelector('#language').textContent = t('nav.switchLanguage')
-  document.querySelector('#language').lang = locale === 'ko' ? 'en' : 'ko'
-  document.querySelector('#theme').textContent = t(colorMode() === 'light' ? 'nav.darkTheme' : 'nav.lightTheme')
+  document
+    .querySelector('#open-palette')
+    .replaceChildren(icon('search'), h('span', {}, t('nav.search')), h('kbd', {}, `${MOD}J`))
+  labelButton('#new-channel', t('channel.title'), 'plus')
+  labelButton('#open-settings', t('nav.settings'), 'settings')
+  const light = colorMode() === 'light'
+  labelButton('#theme', t(light ? 'nav.darkTheme' : 'nav.lightTheme'), light ? 'moon' : 'sun')
+  labelButton('#toggle-left', t('panel.left'), 'panel-left')
+  labelButton('#toggle-right', t('panel.right'), 'panel-right')
+  labelButton('#toggle-right-floating', t('panel.right'), 'panel-right')
+  labelButton('#new-tab', t('nav.addAgent'), 'plus')
+  for (const handle of document.querySelectorAll('.resizer')) handle.setAttribute('aria-label', t('panel.resize'))
   renderUsage()
+  applyPanels()
 }
 
 function h(tag, props = {}, ...children) {
@@ -253,10 +475,6 @@ function markdown(text, members) {
   )
 }
 
-function openStudio(id) {
-  location.hash = `#/studio/${id}`
-}
-
 function messageRow(channel, message) {
   const { author } = message
   if (author.kind === 'system') {
@@ -278,7 +496,7 @@ function messageRow(channel, message) {
             { class: 'danger', type: 'button', onClick: () => reject(member) },
             t('message.chair')
           ),
-          h('button', { class: 'ghost', type: 'button', onClick: () => openStudio(member.id) }, 'Studio')
+          h('button', { class: 'ghost', type: 'button', onClick: () => openAgent(member.id) }, 'Studio')
         )
     )
   }
@@ -307,7 +525,7 @@ function messageRow(channel, message) {
       'header',
       {},
       member
-        ? h('button', { class: 'who', type: 'button', onClick: () => openStudio(member.id) }, name)
+        ? h('button', { class: 'who', type: 'button', onClick: () => openAgent(member.id) }, name)
         : h('span', { class: 'who' }, name),
       h('time', { class: 'time' }, new Date(message.at).toLocaleTimeString()),
       member &&
@@ -508,7 +726,13 @@ function renderMessages(channel) {
         'div',
         { class: 'empty' },
         h('strong', {}, t('stage.emptyTitle')),
-        t('stage.emptyBody')
+        t('stage.emptyBody'),
+        h(
+          'div',
+          { class: 'actions' },
+          h('button', { class: 'primary', type: 'button', onClick: () => importDialog(channel) }, t('stage.import')),
+          h('button', { class: 'ghost', type: 'button', onClick: () => hireDialog(channel) }, t('stage.hire'))
+        )
       )
     )
   }
@@ -520,24 +744,9 @@ let shell = null
 
 function createShell(channelId) {
   const composer = createComposer(channelId)
-  const bar = h('div', { class: 'bar' })
+  const bar = h('div', { class: 'page-toolbar' })
   const list = h('div', { class: 'messages', role: 'log' })
-  const members = h('div', { class: 'list' })
-  const buttons = h('footer')
-  return {
-    channelId,
-    messageIds: [],
-    membersKey: '',
-    composer,
-    bar,
-    list,
-    members,
-    buttons,
-    nodes: [
-      h('section', { class: 'stage' }, bar, list, composer.element),
-      h('aside', { class: 'roster' }, members, buttons)
-    ]
-  }
+  return { channelId, messageIds: [], membersKey: '', composer, bar, list, node: h('section', { class: 'stage' }, bar, list, composer.element) }
 }
 
 // Why the shell stays mounted: moving the textarea in the DOM would cancel a Hangul syllable mid-composition.
@@ -545,40 +754,19 @@ function renderStage(channel) {
   if (shell?.channelId !== channel.id) {
     shell = createShell(channel.id)
   }
-  const { composer, bar, list, members, buttons, nodes } = shell
+  const { composer, bar, list, node } = shell
   const stick = list.scrollHeight - list.scrollTop - list.clientHeight < NEAR_BOTTOM_PX
-  if (main.firstChild !== nodes[0]) {
-    main.className = 'main'
-    main.replaceChildren(...nodes)
-  }
+  if (main.firstChild !== node) main.replaceChildren(node)
   composer.input.setAttribute('aria-label', t('composer.aria', { channel: channel.name }))
   composer.list.setAttribute('aria-label', t('composer.suggestions'))
-  nodes[1].setAttribute('aria-label', t('stage.members'))
   bar.replaceChildren(
-    h('h1', {}, `# ${channel.name}`),
+    h('strong', {}, `# ${channel.name}`),
     h('span', { class: 'path', title: channel.cwd }, channel.cwd),
-    ...(channel.checkCommand
-      ? [h('span', { class: 'tag', title: t('stage.checkTitle') }, t('stage.check', { command: channel.checkCommand }))]
-      : [])
+    channel.checkCommand && h('span', { class: 'tag', title: t('stage.checkTitle') }, t('stage.check', { command: channel.checkCommand }))
   )
   list.setAttribute('aria-label', t('stage.log', { channel: channel.name }))
   renderMessages(channel)
   showReplyTarget(channel)
-  members.replaceChildren(
-    h('p', { class: 'label' }, t('stage.members')),
-    ...channel.members.map((member) =>
-      h(
-        'button',
-        { class: 'member', type: 'button', title: t('stage.openStudio'), onClick: () => openStudio(member.id) },
-        h('span', { class: 'row' }, h('span', { class: 'name' }, `@${member.name}`), activityLabel(member)),
-        staminaBar(member)
-      )
-    )
-  )
-  buttons.replaceChildren(
-    h('button', { class: 'primary', type: 'button', onClick: () => importDialog(channel) }, t('stage.import')),
-    h('button', { class: 'ghost', type: 'button', onClick: () => hireDialog(channel) }, t('stage.hire'))
-  )
   if (stick) list.scrollTop = list.scrollHeight
 }
 
@@ -588,57 +776,17 @@ function renderEntry(entry) {
   return h('p', { class: `entry ${kind}` }, text)
 }
 
-async function loadDiff(member, path, target, button) {
-  target.replaceChildren(t('studio.loading'))
-  main.querySelectorAll('.file').forEach((file) => file.removeAttribute('aria-current'))
-  button.setAttribute('aria-current', 'true')
-  const { diff } = await api(`members/${member.id}/diff?path=${encodeURIComponent(path)}`)
-  target.replaceChildren(
-    ...diff.split('\n').map((line) => {
-      const added = line.startsWith('+') && !line.startsWith('+++')
-      const removed = line.startsWith('-') && !line.startsWith('---')
-      const kind = added ? 'add' : removed ? 'del' : line.startsWith('@@') ? 'hunk' : ''
-      return h('div', { class: kind }, line)
-    })
-  )
-}
-
 let studio = null
 
 function studioButton(label, className, onClick, disabled = false) {
   return h('button', { class: className, type: 'button', disabled, onClick }, label)
 }
 
-async function refreshReview(member, channel) {
-  const { log, git } = await api(`members/${member.id}/studio`)
+async function loadLog(member) {
+  const { log } = await api(`members/${member.id}/studio`)
   if (studio?.memberId !== member.id) return
   studio.log = log
   if (!studio.term) showLog()
-  studio.gitBox.replaceChildren(
-    ...(git
-      ? [h('strong', {}, git.branch), git.isWorktree ? ' · worktree' : t('studio.mainCheckout'), t('studio.changes', { count: git.files.length })]
-      : [t('studio.notGit')]),
-    h(
-      'div',
-      { class: 'path', title: member.sessionId ?? '' },
-      t('studio.session', { id: member.sessionId ?? t('studio.sessionPending'), channel: channel.name })
-    )
-  )
-  studio.files.replaceChildren(
-    ...(git?.files ?? []).map((file) => {
-      const button = h(
-        'button',
-        {
-          class: 'file',
-          type: 'button',
-          onClick: () => loadDiff(member, file.path, studio.diffView, button).catch((error) => studio.diffView.replaceChildren(error.message))
-        },
-        h('span', {}, file.status),
-        h('span', {}, file.path)
-      )
-      return button
-    })
-  )
 }
 
 function showLog() {
@@ -685,42 +833,29 @@ function disposeStudio() {
   studio = null
 }
 
-function renderStudio(member, channel) {
+function renderStudio(member) {
   if (studio?.memberId !== member.id) {
     disposeStudio()
-    const bar = h('div', { class: 'bar' })
+    const bar = h('div', { class: 'page-toolbar' })
     const termSlot = h('div', { class: 'terminal-slot' })
     // The slot shares the terminal theme's background so Orca's colors meet the edge without a seam.
     termSlot.style.background = terminalTheme().background
-    const gitBox = h('div', { class: 'git' })
-    const files = h('div', { class: 'files', 'aria-label': t('studio.changedFiles') })
-    const diffView = h('div', { class: 'diff', 'aria-label': t('studio.diff') }, t('studio.pickFile'))
-    const page = h(
-      'section',
-      { class: 'studio-page' },
-      bar,
-      h('div', { class: 'panes' }, termSlot, h('div', { class: 'review' }, gitBox, files, diffView))
-    )
-    studio = { memberId: member.id, page, bar, termSlot, gitBox, files, diffView, term: null, log: [], logView: null, autoOpened: false, wasBusy: false }
-    main.className = 'main studio'
+    const page = h('section', { class: 'studio-page' }, bar, termSlot)
+    studio = { memberId: member.id, page, bar, termSlot, term: null, log: [], logView: null, autoOpened: false }
     main.replaceChildren(page)
     showLog()
-    void refreshReview(member, channel)
+    void loadLog(member)
   } else if (main.firstChild !== studio.page) {
-    main.className = 'main studio'
     main.replaceChildren(studio.page)
   }
   const busy = Boolean(ui.activity[member.id])
-  if (studio.wasBusy && !busy) void refreshReview(member, channel)
-  studio.wasBusy = busy
   const open = ui.terminals.includes(member.id)
   studio.bar.replaceChildren(
-    h('button', { class: 'ghost', type: 'button', onClick: () => (location.hash = '#/') }, t('studio.back')),
-    h('h2', {}, `@${member.name}`),
+    h('strong', {}, `@${member.name}`),
     activityLabel(member),
     h('span', { class: 'path', title: t('studio.sessionFolder', { path: member.cwd }) }, projectFolder(member)),
     h('span', { class: 'spacer' }),
-    h('div', { class: 'studio-stamina' }, staminaLabel(member), staminaBar(member)),
+    h('div', { class: 'toolbar-stamina' }, staminaLabel(member), staminaBar(member)),
     open
       ? studioButton(t('studio.closeTerminal'), 'ghost', () => api(`members/${member.id}/terminal/close`, {}))
       : studioButton(t('studio.stop'), 'ghost', () => api(`members/${member.id}/stop`, {}), !busy),
@@ -735,67 +870,1078 @@ function statusDot(member) {
   return h('span', { class: `dot ${liveState(member)}`, 'aria-hidden': 'true' })
 }
 
+function stateText(member) {
+  const state = liveState(member)
+  if (state === 'working' || state === 'checking' || state === 'waiting') return t(`activity.${state}`)
+  return member.harness
+}
+
+// --- Left list: channels as Orca's project headers, agents as its workspace cards.
+const COLLAPSED_KEY = 'whiplash.collapsed'
+const collapsed = new Set(readJson(COLLAPSED_KEY, []))
+const tabsRoot = document.querySelector('#tabs')
+const panel = document.querySelector('#panel')
+const activityRoot = document.querySelector('#activity')
+const settingsRoot = document.querySelector('#settings')
+const paletteRoot = document.querySelector('#palette')
+
+const currentChannel = () => ui.channels.find(({ id }) => id === ui.channelId)
+
+function selectChannel(channel) {
+  ui.channelId = channel.id
+  channelTabs(channel).active = 'stage'
+  saveTabs()
+  if (ui.view === 'settings') location.hash = '#/'
+  else render()
+}
+
 function renderChannels() {
+  channelNav.setAttribute('aria-label', t('nav.channels'))
   channelNav.replaceChildren(
-    ...ui.channels.flatMap((channel) => [
+    ...ui.channels.map((channel) => {
+      const tab = channel.id === ui.channelId ? activeTab(channel) : null
+      const isCollapsed = collapsed.has(channel.id)
+      const toggle = (event) => {
+        event.stopPropagation()
+        if (isCollapsed) collapsed.delete(channel.id)
+        else collapsed.add(channel.id)
+        writeStored(COLLAPSED_KEY, JSON.stringify([...collapsed]))
+        renderChannels()
+      }
+      const header = h(
+        'div',
+        {
+          class: `group-header${isCollapsed ? ' collapsed' : ''}`,
+          onContextmenu: (event) => {
+            event.preventDefault()
+            showMenu(event.clientX, event.clientY, channelMenu(channel))
+          },
+          role: 'button',
+          tabindex: 0,
+          'aria-current': tab?.type === 'stage' ? 'page' : undefined,
+          onClick: () => selectChannel(channel),
+          onKeydown: (event) => {
+            if (event.target !== event.currentTarget || (event.key !== 'Enter' && event.key !== ' ')) return
+            event.preventDefault()
+            selectChannel(channel)
+          }
+        },
+        h('span', { class: 'chev-hit', onClick: toggle }, icon('chevron-down', 'icon chev')),
+        h('span', { class: 'label-text' }, `# ${channel.name}`),
+        h(
+          'span',
+          { class: 'hover-actions' },
+          h(
+            'button',
+            {
+              class: 'icon-xs',
+              type: 'button',
+              title: t('nav.addAgent'),
+              'aria-label': t('nav.addAgent'),
+              onClick: (event) => {
+                event.stopPropagation()
+                addAgentMenu(event.currentTarget, channel)
+              }
+            },
+            icon('plus')
+          )
+        )
+      )
+      const cards = isCollapsed
+        ? []
+        : channel.members.map((member) =>
+            h(
+              'button',
+              {
+                class: 'card',
+                type: 'button',
+                'aria-current': tab?.type === 'agent' && tab.memberId === member.id ? 'page' : undefined,
+                onClick: () => openAgent(member.id),
+                onContextmenu: (event) => {
+                  event.preventDefault()
+                  showMenu(event.clientX, event.clientY, agentMenu(channel, member))
+                }
+              },
+              h('span', { class: 'lane' }, statusDot(member)),
+              h(
+                'span',
+                { class: 'lines' },
+                h('span', { class: 'title' }, member.name),
+                h('span', { class: 'meta' }, h('span', {}, stateText(member)), staminaBar(member), h('span', {}, `${staminaOf(member)}%`))
+              )
+            )
+          )
+      return h('div', { class: 'group' }, header, ...cards)
+    })
+  )
+}
+
+// --- Menus: one popover for right-click menus and the "+" menu, styled as Orca's context menu.
+const menu = h('div', { popover: 'auto', class: 'context-menu', role: 'menu' })
+document.body.append(menu)
+menu.addEventListener('keydown', (event) => {
+  if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return
+  event.preventDefault()
+  const items = [...menu.querySelectorAll('button:not(:disabled)')]
+  const next = items.indexOf(document.activeElement) + (event.key === 'ArrowDown' ? 1 : -1)
+  items[(next + items.length) % items.length]?.focus()
+})
+
+function showMenu(x, y, items) {
+  menu.replaceChildren(
+    ...items
+      .filter(Boolean)
+      .map((item) =>
+        item === '-'
+          ? h('div', { class: 'menu-sep', role: 'separator' })
+          : h(
+              'button',
+              {
+                class: `menu-item${item.danger ? ' danger' : ''}`,
+                type: 'button',
+                role: 'menuitem',
+                disabled: item.disabled,
+                onClick: () => {
+                  menu.hidePopover()
+                  item.run()
+                }
+              },
+              item.label
+            )
+      )
+  )
+  menu.showPopover()
+  const { width, height } = menu.getBoundingClientRect()
+  menu.style.left = `${Math.max(4, Math.min(x, window.innerWidth - width - 4))}px`
+  menu.style.top = `${Math.max(4, Math.min(y, window.innerHeight - height - 4))}px`
+  menu.querySelector('button:not(:disabled)')?.focus()
+}
+
+function addAgentMenu(anchor, channel) {
+  if (!channel) return
+  const rect = anchor.getBoundingClientRect()
+  showMenu(rect.left, rect.bottom + 4, [
+    { label: t('stage.import'), run: () => void importDialog(channel) },
+    { label: t('stage.hire'), run: () => hireDialog(channel) }
+  ])
+}
+
+const copyText = (text) => void navigator.clipboard?.writeText(text).catch(() => {})
+const joinPath = (folder, path) => (path ? `${folder.replace(/[\\/]+$/, '')}/${path}` : folder)
+const REVEAL_KEY = navigator.platform.startsWith('Win') ? 'menu.revealWindows' : isMac ? 'menu.revealMac' : 'menu.revealLinux'
+const reveal = (scope, path = '') => void api(`${scope.kind}/${scope.id}/reveal`, { path }).catch(() => {})
+
+/** Orca's path items: absolute, relative, and the file manager. */
+function pathItems(scope, folder, path) {
+  return [
+    { label: t('menu.copyPath'), run: () => copyText(joinPath(folder, path)) },
+    path && { label: t('menu.copyRelativePath'), run: () => copyText(path) },
+    { label: t(REVEAL_KEY), run: () => reveal(scope, path) }
+  ]
+}
+
+function removeMemberDialog(channel, member) {
+  showDialog(
+    t('menu.remove'),
+    [h('p', { class: 'hint' }, t('menu.removeConfirm', { name: member.name, channel: channel.name }))],
+    t('menu.removeSubmit'),
+    () => api(`members/${member.id}/remove`, {})
+  )
+}
+
+function agentMenu(channel, member) {
+  const scope = { kind: 'members', id: member.id }
+  return [
+    { label: t('palette.open'), run: () => openAgent(member.id) },
+    '-',
+    ...pathItems(scope, projectFolder(member), ''),
+    '-',
+    { label: t('studio.stop'), disabled: !ui.activity[member.id], run: () => api(`members/${member.id}/stop`, {}) },
+    { label: 'Not quite my tempo', run: () => reject(member) },
+    '-',
+    { label: t('menu.remove'), danger: true, run: () => removeMemberDialog(channel, member) }
+  ]
+}
+
+function channelMenu(channel) {
+  return [
+    { label: t('stage.import'), run: () => void importDialog(channel) },
+    { label: t('stage.hire'), run: () => hireDialog(channel) },
+    '-',
+    ...pathItems({ kind: 'channels', id: channel.id }, channel.cwd, '')
+  ]
+}
+
+// --- Tabs: the stage, opened agents, and files, diffs and commits, per channel.
+const TABS_KEY = 'whiplash.tabs'
+ui.tabs = readJson(TABS_KEY, {})
+const STAGE_TAB = { key: 'stage', type: 'stage' }
+const TAB_ICONS = { stage: 'hash', agent: 'terminal', file: 'file', diff: 'file-diff', commit: 'git-commit' }
+
+function channelTabs(channel) {
+  const entry = (ui.tabs[channel.id] ??= { open: [], active: 'stage' })
+  const memberIds = new Set(channel.members.map(({ id }) => id))
+  entry.open = entry.open.filter((tab) => tab.type !== 'agent' || memberIds.has(tab.memberId))
+  if (!entry.open.some(({ key }) => key === entry.active)) entry.active = 'stage'
+  return entry
+}
+
+function activeTab(channel) {
+  const entry = channelTabs(channel)
+  return entry.open.find(({ key }) => key === entry.active) ?? STAGE_TAB
+}
+
+function saveTabs() {
+  writeStored(TABS_KEY, JSON.stringify(ui.tabs))
+}
+
+function openTab(channel, tab) {
+  if (!channel) return
+  const entry = channelTabs(channel)
+  const existing = entry.open.find(({ key }) => key === tab.key)
+  if (existing) Object.assign(existing, tab)
+  else entry.open.push(tab)
+  entry.active = tab.key
+  ui.channelId = channel.id
+  saveTabs()
+  if (ui.view === 'settings') location.hash = '#/'
+  else render()
+}
+
+function closeTab(channel, key) {
+  const entry = channelTabs(channel)
+  const index = entry.open.findIndex((tab) => tab.key === key)
+  if (index < 0) return
+  entry.open.splice(index, 1)
+  docs.delete(key)
+  if (entry.active === key) entry.active = (entry.open[index] ?? entry.open[index - 1])?.key ?? 'stage'
+  saveTabs()
+  render()
+}
+
+function openAgent(memberId) {
+  const channel = ui.channels.find(({ members }) => members.some(({ id }) => id === memberId))
+  openTab(channel, { key: `agent:${memberId}`, type: 'agent', memberId })
+}
+
+function tabTitle(channel, tab) {
+  if (tab.type === 'stage') return channel.name
+  if (tab.type === 'agent') return channel.members.find(({ id }) => id === tab.memberId)?.name ?? '?'
+  if (tab.type === 'commit') return tab.short
+  return tab.path.split('/').pop()
+}
+
+function closeOtherTabs(channel, keep) {
+  const entry = channelTabs(channel)
+  for (const tab of entry.open) if (tab.key !== keep) docs.delete(tab.key)
+  entry.open = entry.open.filter((tab) => tab.key === keep)
+  entry.active = keep
+  saveTabs()
+  render()
+}
+
+function tabMenu(channel, tab, member) {
+  if (member) return agentMenu(channel, member)
+  return [
+    tab.type !== 'stage' && { label: t('menu.close'), run: () => closeTab(channel, tab.key) },
+    { label: t('menu.closeOthers'), disabled: channelTabs(channel).open.every((other) => other.key === tab.key), run: () => closeOtherTabs(channel, tab.key) },
+    tab.path && '-',
+    tab.path && { label: t('menu.copyRelativePath'), run: () => copyText(tab.path) },
+    tab.path && { label: t(REVEAL_KEY), run: () => reveal(tab.scope, tab.path) },
+    tab.type === 'commit' && '-',
+    tab.type === 'commit' && { label: t('menu.copySha'), run: () => copyText(tab.sha) }
+  ]
+}
+
+function renderTabs(channel, active) {
+  tabsRoot.replaceChildren(
+    ...[STAGE_TAB, ...channelTabs(channel).open].map((tab) => {
+      const member = tab.type === 'agent' && channel.members.find(({ id }) => id === tab.memberId)
+      const select = () => {
+        channelTabs(channel).active = tab.key
+        saveTabs()
+        render()
+      }
+      return h(
+        'div',
+        {
+          class: 'tab',
+          role: 'tab',
+          tabindex: 0,
+          'aria-selected': String(tab.key === active.key),
+          title: tab.path ?? tab.subject ?? tabTitle(channel, tab),
+          onClick: select,
+          onKeydown: (event) => event.key === 'Enter' && select(),
+          // Middle click closes, as in Orca.
+          onAuxclick: (event) => event.button === 1 && tab.type !== 'stage' && closeTab(channel, tab.key),
+          onContextmenu: (event) => {
+            event.preventDefault()
+            showMenu(event.clientX, event.clientY, tabMenu(channel, tab, member))
+          }
+        },
+        member ? statusDot(member) : icon(TAB_ICONS[tab.type]),
+        h('span', { class: 'tab-label' }, tabTitle(channel, tab)),
+        tab.type !== 'stage' &&
+          h(
+            'button',
+            {
+              class: 'close',
+              type: 'button',
+              'aria-label': t('tabs.close'),
+              onClick: (event) => {
+                event.stopPropagation()
+                closeTab(channel, tab.key)
+              }
+            },
+            icon('x')
+          )
+      )
+    })
+  )
+}
+
+// --- Documents: read-only views of files, diffs and commits, kept while their tab stays open.
+const docs = new Map()
+
+function apiPath(scope, view, params = {}) {
+  const query = new URLSearchParams(params).toString()
+  return `${scope.kind}/${scope.id}/${view}${query ? `?${query}` : ''}`
+}
+
+const diffClass = (line) =>
+  line.startsWith('+') && !line.startsWith('+++')
+    ? 'add'
+    : line.startsWith('-') && !line.startsWith('---')
+      ? 'del'
+      : line.startsWith('@@')
+        ? 'hunk'
+        : ''
+
+function lineRows(text, classify) {
+  const lines = text.split('\n')
+  if (lines.at(-1) === '') lines.pop()
+  return lines.map((line, index) =>
+    h('div', { class: `ln ${classify?.(line) ?? ''}` }, h('span', { class: 'ln-no' }, String(index + 1)), h('span', { class: 'ln-text' }, line))
+  )
+}
+
+function renderDocument(tab) {
+  let doc = docs.get(tab.key)
+  if (!doc) {
+    const body = h('pre', { class: 'document' }, h('div', { class: 'document-note' }, t('studio.loading')))
+    const heading = tab.type === 'commit' ? `${tab.short}  ${tab.subject ?? ''}` : tab.path
+    const node = h(
+      'section',
+      { class: 'studio-page' },
+      h('div', { class: 'page-toolbar' }, icon(TAB_ICONS[tab.type]), h('span', { class: 'path', title: heading }, heading)),
+      body
+    )
+    doc = { node, body, line: null, loaded: false }
+    docs.set(tab.key, doc)
+    void loadDocument(tab, doc)
+  }
+  if (main.firstChild !== doc.node) main.replaceChildren(doc.node)
+  if (doc.loaded && tab.line && doc.line !== tab.line) revealLine(doc, tab.line)
+}
+
+async function loadDocument(tab, doc) {
+  const note = (text) => doc.body.replaceChildren(h('div', { class: 'document-note' }, text))
+  try {
+    if (tab.type === 'file') {
+      const file = await api(apiPath(tab.scope, 'file', { path: tab.path }))
+      if (file.binary) return note(t('doc.binary'))
+      if (file.tooLarge) return note(t('doc.tooLarge', { size: `${Math.round(file.size / 1024)} KB` }))
+      doc.body.replaceChildren(...lineRows(file.text))
+    } else if (tab.type === 'diff') {
+      const { diff } = await api(apiPath(tab.scope, 'diff', { path: tab.path }))
+      doc.body.replaceChildren(...lineRows(diff, diffClass))
+    } else {
+      const { text } = await api(apiPath(tab.scope, 'commit', { sha: tab.sha }))
+      // The message above the first diff header is prose; a "- item" there is not a removed line.
+      let inDiff = false
+      doc.body.replaceChildren(...lineRows(text, (line) => ((inDiff ||= line.startsWith('diff --git')) ? diffClass(line) : '')))
+    }
+    doc.loaded = true
+    if (tab.line) revealLine(doc, tab.line)
+  } catch (error) {
+    note(error.message)
+  }
+}
+
+function revealLine(doc, line) {
+  doc.line = line
+  doc.body.querySelector('.ln.target')?.classList.remove('target')
+  const row = doc.body.children[line - 1]
+  row?.classList.add('target')
+  row?.scrollIntoView({ block: 'center' })
+}
+
+function openDocument(scope, tab) {
+  // Opening from a panel always shows the file as it is now.
+  docs.delete(tab.key)
+  openTab(currentChannel(), { ...tab, scope })
+}
+
+const scopeKeyOf = (scope) => `${scope.kind}/${scope.id}`
+const openFile = (scope, path, line) => openDocument(scope, { key: `file:${scopeKeyOf(scope)}:${path}`, type: 'file', path, line })
+
+// --- Right sidebar: Orca's icon-only activity bar over one panel at a time.
+const PANEL_VIEW_KEY = 'whiplash.panelView'
+const PANEL_VIEWS = [
+  ['explorer', 'files', 'panel.explorer'],
+  ['source', 'git-branch', 'panel.source'],
+  ['history', 'history', 'panel.history']
+]
+let panelView = PANEL_VIEWS.some(([view]) => view === readStored(PANEL_VIEW_KEY)) ? readStored(PANEL_VIEW_KEY) : 'explorer'
+let panelKey = ''
+let panelStale = false
+const explorer = { mode: 'names', query: '', expanded: new Map() }
+
+/** The side panels look at the folder of the open tab: an agent's own, or the channel's. */
+function scopeOf(channel, tab) {
+  return tab.type === 'agent' ? { kind: 'members', id: tab.memberId } : (tab.scope ?? { kind: 'channels', id: channel.id })
+}
+
+function renderActivity() {
+  activityRoot.replaceChildren(
+    ...PANEL_VIEWS.map(([view, iconName, label]) =>
       h(
         'button',
         {
-          class: 'channel',
+          class: 'activity',
           type: 'button',
-          'aria-current': channel.id === ui.channelId && !ui.studioId ? 'page' : undefined,
+          role: 'tab',
+          'aria-selected': String(view === panelView),
+          title: t(label),
+          'aria-label': t(label),
           onClick: () => {
-            ui.channelId = channel.id
-            location.hash = '#/'
+            panelView = view
+            writeStored(PANEL_VIEW_KEY, view)
             render()
           }
         },
-        `# ${channel.name}`
+        icon(iconName)
+      )
+    )
+  )
+}
+
+function renderRight(channel) {
+  renderActivity()
+  if (!panels.right) return
+  const scope = scopeOf(channel, activeTab(channel))
+  const key = `${panelView}|${scopeKeyOf(scope)}`
+  if (key === panelKey && !panelStale) return
+  panelKey = key
+  panelStale = false
+  if (panelView === 'explorer') void renderExplorer(scope, key)
+  else if (panelView === 'source') void renderSource(scope, key)
+  else void renderHistory(scope, key)
+}
+
+const note = (text) => h('p', { class: 'panel-note' }, text)
+const folderName = (folder) => folder.split(/[\\/]/).filter(Boolean).pop() ?? folder
+const splitPath = (path) => {
+  const slash = path.lastIndexOf('/')
+  return [path.slice(slash + 1), slash > 0 ? path.slice(0, slash) : '']
+}
+// git's two-letter porcelain codes, shown as Orca's single letter.
+const statusLetter = (status) => (status === '??' ? 'U' : status.replace(/\s/g, '')[0] ?? 'M')
+
+function panelToolbar(title) {
+  return h(
+    'div',
+    { class: 'panel-toolbar' },
+    h('span', { class: 'title', title }, title),
+    h(
+      'button',
+      {
+        class: 'icon-xs',
+        type: 'button',
+        title: t('panel.refresh'),
+        'aria-label': t('panel.refresh'),
+        onClick: () => {
+          panelStale = true
+          render()
+        }
+      },
+      icon('refresh')
+    )
+  )
+}
+
+function buildTree(paths) {
+  const root = { dirs: new Map(), files: [] }
+  for (const path of paths) {
+    let node = root
+    for (const part of path.split('/').slice(0, -1)) {
+      if (!node.dirs.has(part)) node.dirs.set(part, { dirs: new Map(), files: [] })
+      node = node.dirs.get(part)
+    }
+    node.files.push(path)
+  }
+  return root
+}
+
+async function renderExplorer(scope, key) {
+  const toolbar = panelToolbar('')
+  const modes = h('div', { class: 'segmented', role: 'group' })
+  const input = h('input', { class: 'input', type: 'search', value: explorer.query })
+  const list = h('div', { class: 'panel-scroll' }, note(t('studio.loading')))
+  panel.replaceChildren(toolbar, h('div', { class: 'panel-query' }, modes, input), list)
+  let result
+  try {
+    result = await Promise.all([api(apiPath(scope, 'files')), api(apiPath(scope, 'git')).catch(() => ({ git: null }))])
+  } catch (error) {
+    if (panelKey === key) list.replaceChildren(note(error.message))
+    return
+  }
+  if (panelKey !== key) return
+  const [{ folder, paths, truncated }, { git }] = result
+  const title = toolbar.querySelector('.title')
+  title.textContent = folderName(folder)
+  title.title = folder
+  const status = new Map((git?.files ?? []).map((file) => [file.path, statusLetter(file.status)]))
+  const scopeKey = scopeKeyOf(scope)
+  if (!explorer.expanded.has(scopeKey)) explorer.expanded.set(scopeKey, new Set())
+  const expanded = explorer.expanded.get(scopeKey)
+  const tree = buildTree(paths)
+  let searchTimer = null
+  let searchSeq = 0
+
+  const indent = (row, depth) => {
+    row.style.paddingLeft = `${depth * 16 + 8}px`
+    return row
+  }
+  const fileRow = (path, depth, flat = false) => {
+    const [name, dir] = splitPath(path)
+    const code = status.get(path)
+    return indent(
+      h(
+        'button',
+        {
+          class: 'tree-row',
+          type: 'button',
+          title: path,
+          onClick: () => openFile(scope, path),
+          onContextmenu: (event) => {
+            event.preventDefault()
+            showMenu(event.clientX, event.clientY, [{ label: t('menu.viewFile'), run: () => openFile(scope, path) }, '-', ...pathItems(scope, folder, path)])
+          }
+        },
+        h('span', { class: 'spacer-icon' }),
+        icon('file'),
+        h('span', { class: `name${code ? ` status-${code}` : ''}` }, name),
+        flat && dir && h('span', { class: 'dir' }, dir),
+        code && h('span', { class: `status status-${code}` }, code)
       ),
-      ...channel.members.map((member) =>
+      depth
+    )
+  }
+  const treeRows = (node, depth, prefix) => {
+    const rows = []
+    for (const [name, child] of [...node.dirs].sort(([a], [b]) => a.localeCompare(b))) {
+      const dirPath = prefix ? `${prefix}/${name}` : name
+      const open = expanded.has(dirPath)
+      const toggleDir = () => {
+        if (open) expanded.delete(dirPath)
+        else expanded.add(dirPath)
+        draw()
+      }
+      rows.push(
+        indent(
+          h(
+            'button',
+            {
+              class: 'tree-row',
+              type: 'button',
+              'aria-expanded': String(open),
+              onClick: toggleDir,
+              onContextmenu: (event) => {
+                event.preventDefault()
+                showMenu(event.clientX, event.clientY, [
+                  { label: t(open ? 'menu.collapse' : 'menu.expand'), run: toggleDir },
+                  '-',
+                  ...pathItems(scope, folder, dirPath)
+                ])
+              }
+            },
+            icon(open ? 'chevron-down' : 'chevron-right'),
+            icon('folder'),
+            h('span', { class: 'name' }, name)
+          ),
+          depth
+        )
+      )
+      if (open) rows.push(...treeRows(child, depth + 1, dirPath))
+    }
+    rows.push(...node.files.map((path) => fileRow(path, depth)))
+    return rows
+  }
+  const search = (query) => {
+    clearTimeout(searchTimer)
+    const seq = ++searchSeq
+    searchTimer = setTimeout(async () => {
+      list.replaceChildren(note(t('studio.loading')))
+      const found = await api(apiPath(scope, 'search', { q: query })).catch((error) => ({ hits: [], error }))
+      if (seq !== searchSeq || panelKey !== key) return
+      if (found.error) return list.replaceChildren(note(found.error.message))
+      const byPath = Map.groupBy(found.hits, (hit) => hit.path)
+      list.replaceChildren(
+        ...(byPath.size === 0
+          ? [note(t('explorer.noMatches'))]
+          : [...byPath].flatMap(([path, hits]) => [
+              fileRow(path, 0, true),
+              ...hits.map((hit) =>
+                h(
+                  'button',
+                  { class: 'tree-row hit', type: 'button', onClick: () => openFile(scope, path, hit.line) },
+                  h('span', { class: 'line-no' }, String(hit.line)),
+                  h('span', { class: 'text' }, hit.text.trim())
+                )
+              )
+            ])),
+        ...(found.truncated ? [note(t('explorer.moreResults'))] : [])
+      )
+    }, 250)
+  }
+  function draw() {
+    modes.replaceChildren(
+      ...['names', 'contents'].map((mode) =>
         h(
           'button',
           {
-            class: 'agent',
             type: 'button',
-            'aria-current': member.id === ui.studioId ? 'page' : undefined,
-            onClick: () => openStudio(member.id)
+            'aria-pressed': String(explorer.mode === mode),
+            onClick: () => {
+              explorer.mode = mode
+              draw()
+              input.focus()
+            }
           },
-          statusDot(member),
-          h('span', { class: 'name' }, member.name),
-          h('span', { class: 'kind' }, member.harness)
+          t(`explorer.${mode}`)
         )
       )
+    )
+    const placeholder = t(explorer.mode === 'names' ? 'explorer.filter' : 'explorer.search')
+    input.placeholder = placeholder
+    input.setAttribute('aria-label', placeholder)
+    const query = explorer.query.trim()
+    if (explorer.mode === 'contents') {
+      if (query) search(query)
+      else list.replaceChildren(note(t('explorer.searchHint')))
+      return
+    }
+    if (query) {
+      const lowered = query.toLowerCase()
+      const matches = paths.filter((path) => path.toLowerCase().includes(lowered)).slice(0, 300)
+      list.replaceChildren(...(matches.length ? matches.map((path) => fileRow(path, 0, true)) : [note(t('explorer.noMatches'))]))
+      return
+    }
+    list.replaceChildren(
+      ...treeRows(tree, 0, ''),
+      ...(paths.length === 0 ? [note(t('explorer.empty'))] : []),
+      ...(truncated ? [note(t('explorer.truncated', { count: paths.length }))] : [])
+    )
+  }
+  input.addEventListener('input', () => {
+    explorer.query = input.value
+    draw()
+  })
+  draw()
+}
+
+async function renderSource(scope, key) {
+  const list = h('div', { class: 'panel-scroll' }, note(t('studio.loading')))
+  panel.replaceChildren(panelToolbar(t('panel.source')), list)
+  const { git } = await api(apiPath(scope, 'git')).catch(() => ({ git: null }))
+  if (panelKey !== key) return
+  if (!git) return list.replaceChildren(note(t('studio.notGit')))
+  list.replaceChildren(
+    h(
+      'div',
+      { class: 'branch' },
+      icon('git-branch'),
+      h('strong', {}, git.branch),
+      h('span', { class: 'muted' }, t(git.isWorktree ? 'source.worktree' : 'source.mainCheckout'))
+    ),
+    h('div', { class: 'section-row' }, t('source.changes'), h('span', { class: 'count' }, String(git.files.length))),
+    ...(git.files.length
+      ? git.files.map((file) => {
+          const [name, dir] = splitPath(file.path)
+          const code = statusLetter(file.status)
+          const viewChanges = () => openDocument(scope, { key: `diff:${scopeKeyOf(scope)}:${file.path}`, type: 'diff', path: file.path })
+          const row = h(
+            'button',
+            {
+              class: 'tree-row',
+              type: 'button',
+              title: file.path,
+              onClick: viewChanges,
+              onContextmenu: (event) => {
+                event.preventDefault()
+                showMenu(event.clientX, event.clientY, [
+                  { label: t('menu.viewChanges'), run: viewChanges },
+                  { label: t('menu.viewFile'), disabled: code === 'D', run: () => openFile(scope, file.path) },
+                  '-',
+                  ...pathItems(scope, git.root, file.path)
+                ])
+              }
+            },
+            icon('file', `icon status-${code}`),
+            h('span', { class: 'name' }, name),
+            dir && h('span', { class: 'dir' }, dir),
+            h('span', { class: `status status-${code}` }, code)
+          )
+          row.style.paddingLeft = '20px'
+          return row
+        })
+      : [note(t('source.clean'))])
+  )
+}
+
+async function renderHistory(scope, key) {
+  const list = h('div', { class: 'panel-scroll' }, note(t('studio.loading')))
+  panel.replaceChildren(panelToolbar(t('panel.history')), list)
+  const { commits } = await api(apiPath(scope, 'log')).catch(() => ({ commits: [] }))
+  if (panelKey !== key) return
+  list.replaceChildren(
+    ...(commits.length
+      ? commits.map((commit) =>
+          h(
+            'button',
+            {
+              class: 'commit',
+              type: 'button',
+              title: commit.subject,
+              onContextmenu: (event) => {
+                event.preventDefault()
+                showMenu(event.clientX, event.clientY, [{ label: t('menu.copySha'), run: () => copyText(commit.sha) }])
+              },
+              onClick: () =>
+                openDocument(scope, {
+                  key: `commit:${scopeKeyOf(scope)}:${commit.sha}`,
+                  type: 'commit',
+                  sha: commit.sha,
+                  short: commit.short,
+                  subject: commit.subject
+                })
+            },
+            h('span', { class: 'subject' }, commit.subject),
+            h('span', { class: 'meta' }, h('code', {}, commit.short), ` · ${commit.author} · ${timeAgo(commit.at)}`)
+          )
+        )
+      : [note(t('history.empty'))])
+  )
+}
+
+// --- Palettes: Orca's ⌘J (go to a channel or agent) and ⌘P (go to file).
+function openPalette(placeholder, load) {
+  const input = h('input', { class: 'palette-input', placeholder, 'aria-label': placeholder })
+  const list = h('ul', { role: 'listbox' }, h('li', { class: 'panel-note' }, t('studio.loading')))
+  let items = []
+  let shown = []
+  let active = 0
+  const pick = (item) => {
+    paletteRoot.close()
+    item.run()
+  }
+  const select = (index) => {
+    active = index
+    list.querySelectorAll('li[role="option"]').forEach((row, rowIndex) => row.setAttribute('aria-selected', String(rowIndex === index)))
+    list.children[index]?.scrollIntoView({ block: 'nearest' })
+  }
+  const draw = () => {
+    const terms = input.value.toLowerCase().split(/\s+/).filter(Boolean)
+    shown = items.filter((item) => terms.every((term) => `${item.label} ${item.detail ?? ''}`.toLowerCase().includes(term))).slice(0, 200)
+    list.replaceChildren(
+      ...(shown.length
+        ? shown.map((item, index) =>
+            h(
+              'li',
+              { role: 'option', 'aria-selected': String(index === 0) },
+              h(
+                'button',
+                { type: 'button', tabindex: -1, onClick: () => pick(item), onMousemove: () => active !== index && select(index) },
+                icon(item.icon),
+                h('span', {}, item.label),
+                item.detail && h('span', { class: 'detail' }, item.detail)
+              )
+            )
+          )
+        : [h('li', { class: 'panel-note' }, t('palette.empty'))])
+    )
+    active = 0
+  }
+  input.addEventListener('input', draw)
+  input.addEventListener('keydown', (event) => {
+    if (event.isComposing || shown.length === 0) return
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault()
+      select((active + (event.key === 'ArrowDown' ? 1 : -1) + shown.length) % shown.length)
+    } else if (event.key === 'Enter') {
+      event.preventDefault()
+      pick(shown[active])
+    }
+  })
+  const hint = (key, label) => h('span', {}, h('kbd', {}, key), ` ${label}`)
+  paletteRoot.replaceChildren(
+    input,
+    list,
+    h('footer', {}, hint('↵', t('palette.open')), hint('↑↓', t('palette.navigate')), hint('esc', t('palette.close')))
+  )
+  if (!paletteRoot.open) paletteRoot.showModal()
+  input.focus()
+  Promise.resolve(load()).then(
+    (loaded) => {
+      items = loaded
+      draw()
+    },
+    (error) => list.replaceChildren(h('li', { class: 'panel-note' }, error.message))
+  )
+}
+
+paletteRoot.addEventListener('click', (event) => {
+  if (event.target === paletteRoot) paletteRoot.close()
+})
+
+function switchPalette() {
+  openPalette(t('palette.switch'), () =>
+    ui.channels.flatMap((channel) => [
+      { icon: 'hash', label: `# ${channel.name}`, detail: channel.cwd, run: () => selectChannel(channel) },
+      ...channel.members.map((member) => ({
+        icon: 'terminal',
+        label: member.name,
+        detail: `#${channel.name} · ${member.harness}`,
+        run: () => openAgent(member.id)
+      }))
     ])
   )
 }
 
-function render() {
-  const studioMember = ui.channels.flatMap(({ members }) => members).find(({ id }) => id === ui.studioId)
-  if (studioMember) {
-    const channel = ui.channels.find(({ members }) => members.includes(studioMember))
-    ui.channelId = channel.id
-    renderChannels()
-    renderStudio(studioMember, channel)
-    return
-  }
-  disposeStudio()
-  const channel = ui.channels.find(({ id }) => id === ui.channelId) ?? ui.channels[0]
-  ui.channelId = channel?.id ?? null
-  renderChannels()
-  if (channel) {
-    renderStage(channel)
-  } else {
-    main.className = 'main studio'
-    main.replaceChildren(
+function filePalette() {
+  const channel = currentChannel()
+  if (!channel || ui.view === 'settings') return
+  const scope = scopeOf(channel, activeTab(channel))
+  openPalette(t('palette.files'), async () => {
+    const { paths } = await api(apiPath(scope, 'files'))
+    return paths.map((path) => {
+      const [name, dir] = splitPath(path)
+      return { icon: 'file', label: name, detail: dir, run: () => openFile(scope, path) }
+    })
+  })
+}
+
+// --- Settings: a full page, as in Orca, with a left nav and section cards.
+let settingsDirty = true
+let settingsSection = 'general'
+const SETTINGS_SECTIONS = [
+  ['general', 'sliders'],
+  ['accounts', 'circle-user'],
+  ['terminal', 'terminal'],
+  ['shortcuts', 'keyboard']
+]
+
+function settingsBlock(id, ...cards) {
+  return h(
+    'section',
+    { class: 'settings-section', id: `settings-${id}` },
+    h('header', {}, h('h2', {}, t(`settings.${id}`)), h('p', {}, t(`settings.${id}Body`))),
+    ...cards
+  )
+}
+
+function settingsRow(label, description, control) {
+  return h(
+    'div',
+    { class: 'settings-row' },
+    h('div', { class: 'row-label' }, h('strong', {}, label), description && h('span', {}, description)),
+    control
+  )
+}
+
+function segmented(options, current, onPick) {
+  return h(
+    'div',
+    { class: 'segmented', role: 'group' },
+    ...options.map(([value, label]) => h('button', { type: 'button', 'aria-pressed': String(value === current), onClick: () => onPick(value) }, label))
+  )
+}
+
+function setTheme(value) {
+  writeStored(THEME_KEY, value)
+  applyTheme(value)
+  repaintForTheme()
+}
+
+function accountRow(name, account, providerUsage, loginHint) {
+  const windows = providerUsage ? [providerUsage.session, providerUsage.weekly].filter(Boolean) : []
+  return h(
+    'div',
+    { class: 'settings-row' },
+    h(
+      'div',
+      { class: 'row-label' },
+      h(
+        'strong',
+        { class: 'account-head' },
+        h('span', { class: `dot${account?.signedIn ? ' attached' : ''}`, 'aria-hidden': 'true' }),
+        name,
+        h('span', { class: 'value' }, account?.email ?? '')
+      ),
+      h(
+        'span',
+        {},
+        !account
+          ? t('studio.loading')
+          : account.signedIn
+            ? [t('settings.signedIn'), account.plan && ` · ${t('settings.plan', { plan: account.plan })}`].filter(Boolean).join('')
+            : `${t('settings.signedOut')} — ${loginHint}`
+      )
+    ),
+    h(
+      'div',
+      { class: 'account-usage' },
+      ...windows.map((window) => {
+        const percent = clampUsedPercent(window.usedPercent)
+        return h(
+          'div',
+          { class: 'usage-detail' },
+          h('span', { class: 'usage-label' }, window === providerUsage.session ? t('usage.session') : t('usage.weekly'), h('strong', {}, t('usage.used', { percent }))),
+          usageBar(percent, true),
+          h('span', { class: 'usage-reset' }, resetText(window))
+        )
+      })
+    )
+  )
+}
+
+function renderSettings() {
+  const content = h('div', { class: 'settings-inner' })
+  const navItems = SETTINGS_SECTIONS.map(([id, iconName]) =>
+    h(
+      'button',
+      {
+        class: 'nav-item',
+        type: 'button',
+        'aria-current': String(id === settingsSection),
+        onClick: () => {
+          settingsSection = id
+          navItems.forEach((item, index) => item.setAttribute('aria-current', String(SETTINGS_SECTIONS[index][0] === id)))
+          content.querySelector(`#settings-${id}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+        }
+      },
+      icon(iconName),
+      t(`settings.${id}`)
+    )
+  )
+  const accounts = h('div', { class: 'settings-card' }, accountRow('Claude Code', null), accountRow('Codex', null))
+  const terminal = h('div', { class: 'settings-card' }, note(t('studio.loading')))
+  const keys = (...parts) => h('span', { class: 'shortcut-keys' }, ...parts.map((part) => h('kbd', {}, part)))
+  content.append(
+    settingsBlock(
+      'general',
       h(
         'div',
-        { class: 'empty' },
-        h('strong', {}, 'Not quite my tempo.'),
-        t('home.body')
+        { class: 'settings-card' },
+        settingsRow(t('settings.language'), t('settings.languageBody'), segmented([['ko', '한국어'], ['en', 'English']], locale, setLocale)),
+        settingsRow(
+          t('settings.theme'),
+          t('settings.themeBody'),
+          segmented(
+            [['system', t('settings.system')], ['light', t('settings.light')], ['dark', t('settings.dark')]],
+            readStored(THEME_KEY) ?? 'system',
+            setTheme
+          )
+        )
+      )
+    ),
+    settingsBlock('accounts', accounts),
+    settingsBlock('terminal', terminal),
+    settingsBlock(
+      'shortcuts',
+      h(
+        'div',
+        { class: 'settings-card' },
+        settingsRow(t('shortcut.switch'), null, keys(MOD, 'J')),
+        settingsRow(t('shortcut.files'), null, keys(MOD, 'P')),
+        settingsRow(t('shortcut.left'), null, keys(MOD, 'B')),
+        settingsRow(t('shortcut.right'), null, keys(MOD, 'L')),
+        settingsRow(t('shortcut.settings'), null, keys(MOD, ',')),
+        settingsRow(t('shortcut.send'), null, keys('Enter')),
+        settingsRow(t('shortcut.newline'), null, keys('Shift', 'Enter')),
+        settingsRow(t('shortcut.clearReply'), null, keys('Esc'))
       )
     )
+  )
+  settingsRoot.replaceChildren(
+    h('div', { class: 'settings-titlebar' }, h('span', { class: 'traffic-pad' })),
+    h(
+      'div',
+      { class: 'settings-body' },
+      h(
+        'aside',
+        { class: 'settings-nav' },
+        h('div', {}, h('button', { class: 'back', type: 'button', onClick: () => (location.hash = '#/') }, icon('arrow-left'), t('settings.back'))),
+        h('nav', {}, ...navItems)
+      ),
+      h('div', { class: 'settings-content' }, content)
+    )
+  )
+  // Opened for a section (e.g. accounts from the usage popover): land on it.
+  if (settingsSection !== 'general') requestAnimationFrame(() => content.querySelector(`#settings-${settingsSection}`)?.scrollIntoView({ block: 'start' }))
+  void api('accounts').then(({ claude, codex }) =>
+    accounts.replaceChildren(
+      accountRow('Claude Code', claude, usage?.claude, t('settings.loginClaude')),
+      accountRow('Codex', codex, usage?.codex, t('settings.loginCodex'))
+    )
+  )
+  void api('terminal-appearance').then(
+    (appearance) =>
+      terminal.replaceChildren(
+        settingsRow(t('settings.font'), null, h('span', { class: 'value' }, appearance.fontFamily)),
+        settingsRow(t('settings.fontSize'), null, h('span', { class: 'value' }, `${appearance.fontSize}px`)),
+        settingsRow(t('settings.darkTheme'), null, h('span', { class: 'value' }, appearance.themeDark)),
+        settingsRow(t('settings.lightTheme'), null, h('span', { class: 'value' }, appearance.themeLight))
+      ),
+    () => terminal.replaceChildren(note(t('settings.noOrca')))
+  )
+}
+
+function render() {
+  const inSettings = ui.view === 'settings'
+  appRoot.classList.toggle('settings-open', inSettings)
+  settingsRoot.hidden = !inSettings
+  if (inSettings) {
+    if (settingsDirty) {
+      settingsDirty = false
+      renderSettings()
+    }
+    return
   }
+  const channel = currentChannel() ?? ui.channels[0]
+  ui.channelId = channel?.id ?? null
+  renderChannels()
+  if (!channel) {
+    disposeStudio()
+    tabsRoot.replaceChildren()
+    main.replaceChildren(h('div', { class: 'empty' }, h('strong', {}, 'Not quite my tempo.'), t('home.body')))
+    renderActivity()
+    panel.replaceChildren(note(t('home.body')))
+    panelKey = ''
+    return
+  }
+  const tab = activeTab(channel)
+  renderTabs(channel, tab)
+  const member = tab.type === 'agent' && channel.members.find(({ id }) => id === tab.memberId)
+  if (member) {
+    renderStudio(member)
+  } else {
+    disposeStudio()
+    if (tab.type === 'stage') renderStage(channel)
+    else renderDocument(tab)
+  }
+  renderRight(channel)
 }
 
 function showDialog(title, fields, submitLabel, onSubmit) {
@@ -934,7 +2080,9 @@ async function importDialog(channel) {
 }
 
 function route() {
-  ui.studioId = /^#\/studio\/(.+)$/.exec(location.hash)?.[1] ?? null
+  const view = location.hash === '#/settings' ? 'settings' : 'app'
+  if (view === 'settings' && ui.view !== 'settings') settingsDirty = true
+  ui.view = view
   render()
 }
 
@@ -943,31 +2091,33 @@ function reject(member) {
 }
 
 document.querySelector('#new-channel').addEventListener('click', () => void channelDialog())
-document.querySelector('#language').addEventListener('click', () => setLocale(locale === 'ko' ? 'en' : 'ko'))
+document.querySelector('#open-palette').addEventListener('click', switchPalette)
+document.querySelector('#open-settings').addEventListener('click', () => (location.hash = '#/settings'))
+document.querySelector('#new-tab').addEventListener('click', (event) => addAgentMenu(event.currentTarget, currentChannel()))
 // The open terminal repaints with the matching Orca theme; runs only after startup, once studio exists.
 function repaintForTheme() {
   if (studio) {
     studio.termSlot.style.background = terminalTheme().background
     studio.term?.setTheme(terminalTheme())
   }
+  settingsDirty = true
   applyStaticText()
+  render()
 }
 
-document.querySelector('#theme').addEventListener('click', () => {
-  const next = colorMode() === 'light' ? 'dark' : 'light'
-  writeStored(THEME_KEY, next)
-  applyTheme(next)
-  repaintForTheme()
-})
+document.querySelector('#theme').addEventListener('click', () => setTheme(colorMode() === 'light' ? 'dark' : 'light'))
 matchMedia('(prefers-color-scheme: light)').addEventListener('change', repaintForTheme)
 applyStaticText()
 void refreshUsage()
 setInterval(() => void refreshUsage(), USAGE_REFRESH_MS)
+setInterval(renderUsage, USAGE_TICK_MS)
 window.addEventListener('hashchange', route)
 
 const events = new EventSource('/api/events')
 events.addEventListener('state', (event) => {
   const next = JSON.parse(event.data)
+  // A finished turn may have changed files and commits; the side panel reloads on its next render.
+  if (Object.keys(ui.activity).some((id) => !next.activity[id])) panelStale = true
   ui.channels = next.channels
   ui.activity = next.activity
   ui.queued = next.queued ?? []

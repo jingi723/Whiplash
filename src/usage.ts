@@ -19,6 +19,9 @@ import type { RateLimitWindow } from './orca/rate-limits/rate-limit-types.ts'
 export type ProviderUsage = {
   session: RateLimitWindow | null
   weekly: RateLimitWindow | null
+  /** Claude's separate weekly allowance for the Fable model. */
+  fable?: RateLimitWindow | null
+  plan?: string
   /** Why nothing could be read: not signed in, or the request failed. */
   error?: 'signedOut' | 'unavailable'
 }
@@ -47,10 +50,13 @@ function keychainUser(): string {
 }
 
 /** Orca's readClaudeOAuthCredentials order: the macOS keychain, then ~/.claude/.credentials.json. */
-async function readClaudeToken(): Promise<string | null> {
-  const parse = (raw: string): string | null => {
+type ClaudeCredentials = { token: string; plan?: string }
+
+async function readClaudeToken(): Promise<ClaudeCredentials | null> {
+  const parse = (raw: string): ClaudeCredentials | null => {
     try {
-      return JSON.parse(raw)?.claudeAiOauth?.accessToken || null
+      const oauth = JSON.parse(raw)?.claudeAiOauth
+      return oauth?.accessToken ? { token: oauth.accessToken, plan: oauth.subscriptionType } : null
     } catch {
       return null
     }
@@ -69,20 +75,57 @@ async function readClaudeToken(): Promise<string | null> {
   return parse(await readFile(join(dir, '.credentials.json'), 'utf8').catch(() => ''))
 }
 
-type ClaudeUsageResponse = { five_hour?: ClaudeUsageWindowInput; seven_day?: ClaudeUsageWindowInput }
+type ClaudeUsageLimit = {
+  kind?: string
+  percent?: number
+  resets_at?: string | number
+  scope?: { model?: { display_name?: string } | null } | null
+}
+type ClaudeUsageResponse = {
+  five_hour?: ClaudeUsageWindowInput
+  seven_day?: ClaudeUsageWindowInput
+  fable_weekly?: ClaudeUsageWindowInput
+  fable_seven_day?: ClaudeUsageWindowInput
+  seven_day_fable?: ClaudeUsageWindowInput
+  limits?: ClaudeUsageLimit[] | null
+}
+
+// From Orca's claude-oauth-usage-request.ts: the Fable window arrives as a scoped limit or, on older responses, a named field.
+export function mapFableWeeklyWindow(data: ClaudeUsageResponse): RateLimitWindow | null {
+  const scoped = Array.isArray(data.limits)
+    ? data.limits.find(
+        (limit) =>
+          limit?.kind === 'weekly_scoped' &&
+          Number.isFinite(limit.percent) &&
+          limit.scope?.model?.display_name?.trim().toLowerCase() === 'fable'
+      )
+    : undefined
+  return (
+    mapClaudeUsageWindow(scoped ? { used_percentage: scoped.percent, resets_at: scoped.resets_at } : undefined, 10080) ??
+    mapClaudeUsageWindow(data.fable_weekly, 10080) ??
+    mapClaudeUsageWindow(data.fable_seven_day, 10080) ??
+    mapClaudeUsageWindow(data.seven_day_fable, 10080)
+  )
+}
 
 // Request shape from Orca's claude-oauth-usage-request.ts.
 export async function fetchClaudeUsage(fetcher: typeof fetch = fetch): Promise<ProviderUsage> {
-  const token = await readClaudeToken()
-  if (!token) return { session: null, weekly: null, error: 'signedOut' }
+  const credentials = await readClaudeToken()
+  if (!credentials) return { session: null, weekly: null, error: 'signedOut' }
+  const { token, plan } = credentials
   try {
     const response = await fetcher('https://api.anthropic.com/api/oauth/usage', {
       headers: { Authorization: `Bearer ${token}`, 'anthropic-beta': 'oauth-2025-04-20', 'User-Agent': 'claude-code/2.1.0' },
       signal: AbortSignal.timeout(TIMEOUT_MS)
     })
-    if (!response.ok) return { session: null, weekly: null, error: response.status === 401 ? 'signedOut' : 'unavailable' }
+    if (!response.ok) return { session: null, weekly: null, plan, error: response.status === 401 ? 'signedOut' : 'unavailable' }
     const data = (await response.json()) as ClaudeUsageResponse
-    return { session: mapClaudeUsageWindow(data.five_hour, 300), weekly: mapClaudeUsageWindow(data.seven_day, 10080) }
+    return {
+      session: mapClaudeUsageWindow(data.five_hour, 300),
+      weekly: mapClaudeUsageWindow(data.seven_day, 10080),
+      fable: mapFableWeeklyWindow(data),
+      plan
+    }
   } catch {
     return { session: null, weekly: null, error: 'unavailable' }
   }
@@ -129,6 +172,7 @@ export async function fetchCodexUsage(fetcher: typeof fetch = fetch): Promise<Pr
     const minutes = (window: CodexRateWindowSnapshot | null, fallback: number): number =>
       typeof window?.windowDurationMins === 'number' && window.windowDurationMins > 0 ? window.windowDurationMins : fallback
     return {
+      plan: payload.plan_type,
       session: mapCodexRateLimitWindow(classified.session, minutes(classified.session, CODEX_SESSION_WINDOW_MINUTES)),
       weekly: mapCodexRateLimitWindow(classified.weekly, minutes(classified.weekly, CODEX_WEEKLY_WINDOW_MINUTES))
     }

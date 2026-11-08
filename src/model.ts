@@ -9,7 +9,7 @@ export function toLocale(value: unknown): Locale {
   return LOCALES.includes(value as string) ? (value as Locale) : 'en'
 }
 
-/** Mention chains between agents stop here until a human speaks. */
+/** Mention chains between agents stop here until the human master speaks. */
 export const AGENT_CHAIN_LIMIT = 6
 /** One prompt carries at most this many unseen channel messages. */
 export const PROMPT_CONTEXT_MESSAGES = 12
@@ -127,7 +127,7 @@ export function parseTempoCommand(text: string): { name: string; reason: string 
   return match ? { name: match[1], reason: match[2].trim() } : null
 }
 
-/** The reject is said by the conductor, so it uses the conductor's language. */
+/** The reject is said by the master, so it uses the master's language. */
 export function tempoMessage(name: string, reason: string, locale: Locale = 'en'): string {
   const base = createTranslator(locale)('tempo.reject', { name })
   return reason ? `${base} ${reason}` : base
@@ -136,7 +136,7 @@ export function tempoMessage(name: string, reason: string, locale: Locale = 'en'
 function describeAuthor(author: Author): string {
   switch (author.kind) {
     case 'human':
-      return 'conductor (human)'
+      return 'master (human)'
     case 'agent':
       return `@${author.name}`
     case 'system':
