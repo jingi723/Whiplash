@@ -1325,11 +1325,21 @@ function agentMenu(channel, member) {
     { icon: unread ? 'bell-off' : 'bell', label: t(unread ? 'menu.markRead' : 'menu.markUnread'), run: () => setUnread(member, !unread) },
     '-',
     { icon: 'moon', label: t('menu.sleep'), disabled: !terminalOpen, run: () => api(`members/${member.id}/terminal/close`, {}) },
+    { icon: 'refresh', label: t('menu.resetSession'), disabled: Boolean(ui.activity[member.id]), run: () => resetSessionDialog(member) },
     { icon: 'square', label: t('studio.stop'), disabled: !ui.activity[member.id], run: () => api(`members/${member.id}/stop`, {}) },
     { icon: 'x', label: 'Not quite my tempo', run: () => reject(member) },
     '-',
     { icon: 'trash', label: t('menu.remove'), danger: true, run: () => removeMemberDialog(channel, member) }
   ]
+}
+
+function resetSessionDialog(member) {
+  showDialog(
+    t('menu.resetSession'),
+    [h('p', { class: 'hint' }, t('menu.resetConfirm', { name: member.name }))],
+    t('menu.resetSubmit'),
+    () => api(`members/${member.id}/reset`, {})
+  )
 }
 
 function removeChannelDialog(channel) {

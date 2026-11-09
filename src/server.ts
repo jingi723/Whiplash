@@ -455,6 +455,19 @@ async function handleApi(
     revealInFileManager(target)
     return sendJson(response, 200, {})
   }
+  if (parts[1] === 'members' && parts[3] === 'reset') {
+    // Claude Code's /clear for a member: its next turn starts a new session with the room briefing; files stay.
+    const { member } = memberById(id)
+    if (conductor.activityOf()[id]) {
+      throw new HttpError(409, 'busy')
+    }
+    terminals.close(id)
+    member.sessionId = undefined
+    member.contextTokens = undefined
+    member.windowTokens = undefined
+    publishState()
+    return sendJson(response, 200, {})
+  }
   if (parts[1] === 'members' && parts[3] === 'update') {
     const { channel, member } = memberById(id)
     if (body.name !== undefined) member.name = requireMemberName(channel, body.name, member.id)
