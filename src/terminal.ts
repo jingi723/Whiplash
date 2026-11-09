@@ -6,7 +6,7 @@ import { connect, type Socket } from 'node:net'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { agentEnv } from './env.ts'
+import { memberEnv } from './env.ts'
 import type { TurnResult } from './harness.ts'
 import { buildAgentPromptPasteBytes, getAgentPromptSubmitDelayMs } from './orca/agent-prompt-injection.ts'
 import { createProgramStatusOscScanner } from './orca/program-status/osc-scanner.ts'
@@ -319,7 +319,7 @@ export function createTerminalHub(
       command,
       args,
       cwd: member.cwd,
-      env: { ...agentEnv(), TERM: 'xterm-256color', COLORTERM: 'truecolor' },
+      env: { ...memberEnv(member.id), TERM: 'xterm-256color', COLORTERM: 'truecolor' },
       cols,
       rows,
       meta

@@ -1315,6 +1315,9 @@ function agentMenu(channel, member) {
     ...pathItems(scope, projectFolder(member), ''),
     member.sessionId && { icon: 'copy', label: t('menu.copySessionId'), run: () => copyText(member.sessionId) },
     '-',
+    { icon: 'globe', label: t('menu.viewBrowser'), run: () => openBrowser(member.id) },
+    { icon: 'x', label: t('menu.closeBrowser'), run: () => api(`members/${member.id}/browser/close`, {}) },
+    '-',
     { icon: member.pinned ? 'pin-off' : 'pin', label: t(member.pinned ? 'menu.unpin' : 'menu.pin'), run: () => api(`members/${member.id}/update`, { pinned: !member.pinned }) },
     { icon: unread ? 'bell-off' : 'bell', label: t(unread ? 'menu.markRead' : 'menu.markUnread'), run: () => setUnread(member, !unread) },
     '-',
@@ -1394,12 +1397,12 @@ function markSeen(members) {
 const TABS_KEY = 'whiplash.tabs'
 ui.tabs = readJson(TABS_KEY, {})
 const STAGE_TAB = { key: 'stage', type: 'stage' }
-const TAB_ICONS = { stage: 'hash', agent: 'terminal', file: 'file', diff: 'file-diff', commit: 'git-commit' }
+const TAB_ICONS = { stage: 'hash', agent: 'terminal', browser: 'globe', file: 'file', diff: 'file-diff', commit: 'git-commit' }
 
 function channelTabs(channel) {
   const entry = (ui.tabs[channel.id] ??= { open: [], active: 'stage' })
   const memberIds = new Set(channel.members.map(({ id }) => id))
-  entry.open = entry.open.filter((tab) => tab.type !== 'agent' || memberIds.has(tab.memberId))
+  entry.open = entry.open.filter((tab) => !tab.memberId || memberIds.has(tab.memberId))
   if (!entry.open.some(({ key }) => key === entry.active)) entry.active = 'stage'
   return entry
 }
@@ -1442,9 +1445,16 @@ function openAgent(memberId) {
   openTab(channel, { key: `agent:${memberId}`, type: 'agent', memberId })
 }
 
+function openBrowser(memberId) {
+  const channel = ui.channels.find(({ everyone, members }) => !everyone && members.some(({ id }) => id === memberId))
+  // Asking again reconnects, so a browser closed while its tab was open comes back.
+  if (browserView?.key === `browser:${memberId}`) disposeBrowser()
+  openTab(channel, { key: `browser:${memberId}`, type: 'browser', memberId })
+}
+
 function tabTitle(channel, tab) {
   if (tab.type === 'stage') return channel.name
-  if (tab.type === 'agent') return channel.members.find(({ id }) => id === tab.memberId)?.name ?? '?'
+  if (tab.type === 'agent' || tab.type === 'browser') return channel.members.find(({ id }) => id === tab.memberId)?.name ?? '?'
   if (tab.type === 'commit') return tab.short
   return tab.path.split('/').pop()
 }
@@ -1520,6 +1530,52 @@ function renderTabs(channel, active) {
       )
     })
   )
+}
+
+// --- Browser: a live, view-only screencast of the agent's own Chrome, streamed while its tab is shown.
+let browserView = null
+
+function disposeBrowser() {
+  browserView?.source.close()
+  browserView = null
+}
+
+function renderBrowser(tab) {
+  if (browserView?.key !== tab.key) {
+    disposeBrowser()
+    const title = h('strong', {}, t('studio.loading'))
+    const url = h('span', { class: 'path' })
+    const note = h('p', { class: 'hint browser-note' }, t('browser.starting'))
+    const frame = h('img', { class: 'browser-frame', alt: '', hidden: true })
+    const node = h('section', { class: 'studio-page' }, h('div', { class: 'page-toolbar' }, icon('globe'), title, url), h('div', { class: 'browser-view' }, note, frame))
+    const source = new EventSource(`/api/members/${tab.memberId}/browser/stream`)
+    const show = (text) => {
+      note.textContent = text
+      note.hidden = false
+      frame.hidden = true
+    }
+    source.addEventListener('page', (event) => {
+      const page = JSON.parse(event.data)
+      title.textContent = page.title || page.url
+      url.textContent = page.url
+      url.title = page.url
+    })
+    source.addEventListener('frame', (event) => {
+      frame.src = `data:image/jpeg;base64,${JSON.parse(event.data).data}`
+      frame.hidden = false
+      note.hidden = true
+    })
+    source.addEventListener('closed', () => {
+      source.close()
+      show(t('browser.closed'))
+    })
+    // A failed stream carries no body; asking again turns the reason (say, no Chrome) into words.
+    source.onerror = () => {
+      if (source.readyState === EventSource.CLOSED) void api(`members/${tab.memberId}/browser/ensure`, {}).then(() => show(t('browser.closed')), (error) => show(error.message))
+    }
+    browserView = { key: tab.key, node, source }
+  }
+  if (main.firstChild !== browserView.node) main.replaceChildren(browserView.node)
 }
 
 // --- Documents: read-only views of files, diffs and commits, kept while their tab stays open.
@@ -1621,7 +1677,7 @@ const explorer = { mode: 'names', query: '', expanded: new Map() }
 
 /** The side panels look at the folder of the open tab: an agent's own, or the channel's. */
 function scopeOf(channel, tab) {
-  return tab.type === 'agent' ? { kind: 'members', id: tab.memberId } : (tab.scope ?? { kind: 'channels', id: channel.id })
+  return tab.memberId ? { kind: 'members', id: tab.memberId } : (tab.scope ?? { kind: 'channels', id: channel.id })
 }
 
 function renderActivity() {
@@ -2252,6 +2308,7 @@ function render() {
   if (!channel) {
     renderChannels()
     disposeStudio()
+    disposeBrowser()
     tabsRoot.replaceChildren()
     main.replaceChildren(h('div', { class: 'empty' }, h('strong', {}, 'Not quite my tempo.'), t('home.body')))
     renderActivity()
@@ -2265,11 +2322,13 @@ function render() {
   if (document.visibilityState === 'visible') markSeen(member ? [member] : tab.type === 'stage' ? channel.members : [])
   renderChannels()
   renderTabs(channel, tab)
+  if (tab.type !== 'browser') disposeBrowser()
   if (member) {
     renderStudio(member)
   } else {
     disposeStudio()
     if (tab.type === 'stage') renderStage(channel)
+    else if (tab.type === 'browser') renderBrowser(tab)
     else renderDocument(tab)
   }
   renderRight(channel)

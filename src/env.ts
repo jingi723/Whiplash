@@ -1,3 +1,6 @@
+import { browserBin } from './browser.ts'
+import { serverPort } from './store.ts'
+
 /** Markers a parent agent session leaves in its children; inherited, they make a CLI think it is a sub-session.
  *  Orca's list (main/ipc/pty/host-env/spawn-env-keys.ts) plus the session-bound keys seen in a Claude Code shell. */
 const SESSION_MARKERS = new Set([
@@ -21,4 +24,15 @@ export function agentEnv(source: NodeJS.ProcessEnv = process.env): NodeJS.Proces
   return Object.fromEntries(
     Object.entries(source).filter(([name]) => !SESSION_MARKERS.has(name) && !name.startsWith('ORCA_'))
   )
+}
+
+/** An agent's own environment: its `agent-browser` wrapper first on PATH, and who and where it is. */
+export function memberEnv(memberId: string): NodeJS.ProcessEnv {
+  const env = agentEnv()
+  return {
+    ...env,
+    PATH: `${browserBin}:${env.PATH ?? ''}`,
+    WHIPLASH_MEMBER_ID: memberId,
+    WHIPLASH_URL: `http://127.0.0.1:${serverPort}`
+  }
 }

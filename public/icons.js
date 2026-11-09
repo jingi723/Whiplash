@@ -76,6 +76,7 @@ const ICONS = {
     ['line', { x1: 10, x2: 8, y1: 3, y2: 21 }],
     ['line', { x1: 16, x2: 14, y1: 3, y2: 21 }]
   ],
+  globe: [['circle', { cx: 12, cy: 12, r: 10 }], ['path', { d: 'M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20' }], ['path', { d: 'M2 12h20' }]],
   terminal: [['path', { d: 'm4 17 6-6-6-6' }], ['path', { d: 'M12 19h8' }]],
   image: [
     ['rect', { width: 18, height: 18, x: 3, y: 3, rx: 2, ry: 2 }],

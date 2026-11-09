@@ -22,7 +22,8 @@ import {
   type Member
 } from './model.ts'
 import { findTranscript, listSessions } from './sessions.ts'
-import { createSaver, loadState, whiplashHome } from './store.ts'
+import { createSaver, loadState, serverPort, whiplashHome } from './store.ts'
+import { ChromeNotFound, closeBrowser, ensureBrowser, watchBrowser, writeBrowserWrapper } from './browser.ts'
 import { agentEnv } from './env.ts'
 import { grantClaudeWorkspaceTrust, resolveLocalClaudeTrustConfig } from './orca/claude-folder-trust-file.ts'
 import { readOrcaTerminalAppearance } from './orca-appearance.ts'
@@ -30,7 +31,7 @@ import { readUsage } from './usage.ts'
 import { createTerminalHub } from './terminal.ts'
 import { readTranscriptTurn } from './transcript.ts'
 
-const PORT = Number(process.env.PORT ?? 4717)
+const PORT = serverPort
 const HOST = '127.0.0.1'
 const ROOT_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const PUBLIC_DIR = join(ROOT_DIR, 'public')
@@ -372,6 +373,10 @@ async function handleApi(
     const folder = parts[1] === 'channels' ? folderChannelById(id).cwd : projectFolder(memberById(id).member)
     return sendJson(response, 200, await readFolder(folder, parts[3], url.searchParams))
   }
+  if (request.method === 'GET' && parts[1] === 'members' && parts[3] === 'browser' && parts[4] === 'stream') {
+    memberById(id)
+    return openBrowserStream(request, response, id)
+  }
   if (request.method !== 'POST') {
     throw new HttpError(404, 'notFound')
   }
@@ -380,6 +385,15 @@ async function handleApi(
     return sendJson(response, 201, { path: await saveUpload(request) })
   }
   const body = await readJson(request)
+  if (parts[1] === 'members' && parts[3] === 'browser') {
+    memberById(id)
+    if (parts[4] === 'ensure') return sendJson(response, 200, { port: await ensureBrowser(id).catch(browserError) })
+    if (parts[4] === 'close') {
+      await closeBrowser(id)
+      return sendJson(response, 200, {})
+    }
+    throw new HttpError(404, 'notFound')
+  }
   if (route === 'POST /api/terminal-colors') {
     terminals.setColors(body)
     return sendJson(response, 200, {})
@@ -486,6 +500,7 @@ async function handleApi(
     for (const member of channel.members) {
       conductor.stop(member.id)
       terminals.close(member.id)
+      void closeBrowser(member.id)
     }
     state.channels = state.channels.filter((candidate) => candidate.id !== id)
     publishState()
@@ -495,6 +510,7 @@ async function handleApi(
     const { channel } = memberById(id)
     conductor.stop(id)
     terminals.close(id)
+    void closeBrowser(id)
     channel.members = channel.members.filter((member) => member.id !== id)
     publishState()
     return sendJson(response, 200, {})
@@ -556,6 +572,24 @@ function openTerminalStream(request: IncomingMessage, response: ServerResponse, 
   request.on('close', unsubscribe)
 }
 
+function browserError(error: Error): never {
+  throw error instanceof ChromeNotFound ? new HttpError(503, 'chromeNotFound') : new HttpError(500, 'browserFailed', { detail: error.message })
+}
+
+/** The member's Chrome as SSE: `page` (URL and title) and `frame` (a JPEG), ending with `closed`. */
+async function openBrowserStream(request: IncomingMessage, response: ServerResponse, memberId: string): Promise<void> {
+  // The CDP socket opens on a later tick, so the head is written before any event arrives.
+  const stop = await watchBrowser(memberId, (event) => {
+    if (response.writableEnded || response.destroyed) return
+    response.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)
+    if (event.type === 'closed') response.end()
+  }).catch(browserError)
+  // Chrome can take seconds to start; a viewer who left meanwhile must not leave the CDP socket behind.
+  if (request.socket.destroyed) return stop()
+  response.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store' })
+  response.on('close', stop)
+}
+
 async function serveStatic(response: ServerResponse, pathname: string): Promise<void> {
   const relative = normalize(pathname === '/' ? 'index.html' : pathname.slice(1))
   const path = VENDOR_FILES[pathname] ?? join(PUBLIC_DIR, relative)
@@ -571,7 +605,7 @@ async function serveStatic(response: ServerResponse, pathname: string): Promise<
     'cache-control': 'no-cache',
     // xterm positions its rows with inline styles; scripts stay limited to this origin.
     'content-security-policy':
-      "default-src 'self'; style-src 'self' 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'",
+      "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'",
     'x-content-type-options': 'nosniff'
   })
   response.end(content)
@@ -609,6 +643,7 @@ const server = createServer((request, response) => {
 
 // Agents left running by the previous server come back before anyone can ask for them.
 await terminals.ready
+writeBrowserWrapper()
 server.listen(PORT, HOST, () => {
   console.log(`Whiplash: http://${HOST}:${PORT}`)
 })

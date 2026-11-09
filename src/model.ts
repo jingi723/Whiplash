@@ -217,6 +217,7 @@ export function buildTurnPrompt(channel: Channel, member: Member): string {
     'Members:',
     ...roster,
     "To hand work to a member, write their @name in your reply. Don't @mention anyone for a bare acknowledgement.",
+    'For a web browser, run `agent-browser` (see `agent-browser --help`): it drives your own Chrome, which the master can watch.',
     ...(fresh && member.instructions.trim()
       ? ['Your instructions:', member.instructions.trim()]
       : []),

@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import type { State } from './model.ts'
 
 export const whiplashHome = process.env.WHIPLASH_HOME ?? join(homedir(), '.whiplash')
+export const serverPort = Number(process.env.PORT ?? 4717)
 const SAVE_DELAY_MS = 300
 
 export function loadState(home = whiplashHome): State {

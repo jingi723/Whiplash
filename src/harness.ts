@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process'
 import { createInterface } from 'node:readline'
-import { agentEnv } from './env.ts'
+import { memberEnv } from './env.ts'
 import type { Harness, Member } from './model.ts'
 
 export type StudioEvent =
@@ -182,7 +182,7 @@ export function runTurn(
   return new Promise((resolve) => {
     const child = spawn(command, args, {
       cwd: member.cwd,
-      env: agentEnv(),
+      env: memberEnv(member.id),
       signal,
       stdio: ['ignore', 'pipe', 'pipe']
     })
