@@ -10,6 +10,7 @@ import {
   english,
   findMentions,
   markDelivered,
+  parseSessionCommand,
   parseTempoCommand,
   planHandoffs,
   projectFolder,
@@ -21,6 +22,7 @@ import {
   type Member,
   type Message,
   type Notice,
+  type SessionCommand,
   type State
 } from './model.ts'
 import type { TurnRead } from './transcript.ts'
@@ -44,6 +46,13 @@ export type ConductorDeps = {
   canInject?: (member: Member) => boolean
   /** Types words into the member's running terminal turn; that turn's reply then answers them too. */
   inject?: (member: Member, prompt: string) => Promise<void>
+  /** Runs `/clear` or `/compact` on the member's session; the member is idle while it runs. */
+  sessionCommand: (
+    member: Member,
+    command: SessionCommand['command'],
+    args: string,
+    signal: AbortSignal
+  ) => Promise<TurnResult>
   onChange: () => void
   onStudioEvent: (memberId: string, event: StudioEvent) => void
 }
@@ -83,6 +92,8 @@ export function createConductor(deps: ConductorDeps) {
   const pending = new Map<string, Set<Channel>>()
   const runningIn = new Map<string, Channel>()
   const activity = new Map<string, Activity>()
+  /** Commands wait for the member's turn to end; a `/clear` mid-turn would throw that turn's work away. */
+  const commands = new Map<string, Array<{ channel: Channel; command: SessionCommand['command']; args: string }>>()
 
   const channelOf = (memberId: string): Channel | undefined =>
     state.channels.find(({ everyone, members }) => !everyone && members.some(({ id }) => id === memberId))
@@ -91,7 +102,7 @@ export function createConductor(deps: ConductorDeps) {
     channel: Channel,
     author: Author,
     text: string,
-    extra: Pick<Message, 'alertMemberId' | 'notice' | 'attachments'> = {}
+    extra: Pick<Message, 'alertMemberId' | 'notice' | 'attachments' | 'command'> = {}
   ): void {
     channel.messages.push({ id: randomUUID(), seq: channel.nextSeq++, author, text, at: Date.now(), ...extra })
     channel.messages.splice(0, channel.messages.length - CHANNEL_MESSAGE_LIMIT)
@@ -117,7 +128,8 @@ export function createConductor(deps: ConductorDeps) {
   /** A mention that landed before the prompt was built is already answered. */
   function hasUnseenMessage(channel: Channel, member: Member): boolean {
     return channel.messages.some(
-      ({ seq, author }) =>
+      ({ seq, author, command }) =>
+        !command &&
         seq > deliveredThrough(channel, member) &&
         !(author.kind === 'agent' && author.memberId === member.id) &&
         author.kind !== 'system'
@@ -139,20 +151,73 @@ export function createConductor(deps: ConductorDeps) {
       deps.onChange()
       return
     }
+    start(channel, member, (controller) => playTurn(channel, member, controller))
+  }
+
+  function requestCommand(channel: Channel, member: Member, command: SessionCommand['command'], args: string): void {
+    if (running.has(member.id)) {
+      commands.set(member.id, [...(commands.get(member.id) ?? []), { channel, command, args }])
+      deps.onChange()
+      return
+    }
+    start(channel, member, (controller) => playCommand(channel, member, command, args, controller))
+  }
+
+  function start(channel: Channel, member: Member, play: (controller: AbortController) => Promise<void>): void {
     const controller = new AbortController()
     running.set(member.id, controller)
     runningIn.set(member.id, channel)
     setActivity(member.id, 'working')
-    void playTurn(channel, member, controller).finally(() => {
+    void play(controller).finally(() => {
       running.delete(member.id)
       runningIn.delete(member.id)
       setActivity(member.id, null)
+      const next = commands.get(member.id)?.shift()
+      if (next) {
+        requestCommand(next.channel, member, next.command, next.args)
+        return
+      }
+      commands.delete(member.id)
       const queued = pending.get(member.id) ?? []
       pending.delete(member.id)
       for (const waiting of queued) {
         if (hasUnseenMessage(waiting, member)) requestTurn(waiting, member)
       }
     })
+  }
+
+  async function playCommand(
+    channel: Channel,
+    member: Member,
+    command: SessionCommand['command'],
+    args: string,
+    controller: AbortController
+  ): Promise<void> {
+    if (command === 'compact') {
+      if (!member.sessionId || member.harness !== 'claude') {
+        notify(channel, member.sessionId ? 'compactUnsupported' : 'nothingToCompact', { name: member.name })
+        return
+      }
+      if (await isUsedElsewhere(member)) {
+        notify(channel, 'busyElsewhere', { name: member.name })
+        return
+      }
+    }
+    const result = await deps.sessionCommand(member, command, args, controller.signal)
+    member.lastTurnEndedAt = Date.now()
+    if (controller.signal.aborted) {
+      notify(channel, 'turnStopped', { name: member.name })
+      return
+    }
+    if (!result.ok) {
+      notify(channel, 'turnFailed', { name: member.name, error: result.error ?? 'Command failed' }, member.id)
+      return
+    }
+    if (command === 'compact') {
+      const session = await deps.readSession(member)
+      member.contextTokens = session?.contextTokens ?? member.contextTokens
+    }
+    notify(channel, command === 'clear' ? 'sessionCleared' : 'sessionCompacted', { name: member.name })
   }
 
   /** Resuming a session another console is writing would split its conversation, so the turn is refused. */
@@ -251,6 +316,15 @@ export function createConductor(deps: ConductorDeps) {
   }
 
   function sendHumanMessage(channel: Channel, text: string, locale: Locale = 'en', attachments: Attachment[] = []): void {
+    const command = parseSessionCommand(text, channel.members.map(({ name }) => name))
+    if (command) {
+      append(channel, { kind: 'human' }, text.trim(), { command: true })
+      for (const name of command.names) {
+        const member = channel.members.find((candidate) => candidate.name === name)
+        if (member) requestCommand(channel, member, command.command, command.args)
+      }
+      return
+    }
     const tempo = parseTempoCommand(text)
     const body = tempo ? tempoMessage(tempo.name, tempo.reason, locale) : text
     channel.agentChain = 0
@@ -270,7 +344,7 @@ export function createConductor(deps: ConductorDeps) {
     channelOf,
     isUsedElsewhere,
     activityOf: (): Record<string, Activity> => Object.fromEntries(activity),
-    queuedOf: (): string[] => [...pending.keys()],
+    queuedOf: (): string[] => [...new Set([...pending.keys(), ...commands.keys()])],
     reject(memberId: string, locale: Locale = 'en'): void {
       const channel = channelOf(memberId)
       const member = channel?.members.find(({ id }) => id === memberId)
@@ -280,6 +354,7 @@ export function createConductor(deps: ConductorDeps) {
     },
     stop(memberId: string): void {
       pending.delete(memberId)
+      commands.delete(memberId)
       running.get(memberId)?.abort()
     },
     stopAll(): void {

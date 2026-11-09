@@ -16,6 +16,9 @@ const DEFAULT_WINDOW = 200_000
 const LARGE_WINDOW = 1_000_000
 const LIVE_SESSION_MS = 120_000
 const MENTION_QUERY = /(?:^|\s)@([\p{L}\p{N}_-]*)$/u
+// `@name /clear` runs Claude Code's command on that member; the reply chip stands in for the @name.
+const COMMAND_QUERY = /^((?:@[\p{L}\p{N}_-]+\s+)*)\/([a-z]*)$/u
+const SESSION_COMMANDS = ['clear', 'compact']
 const NEAR_BOTTOM_PX = 120
 
 const ui = {
@@ -600,19 +603,24 @@ function createComposer(channelId) {
   let active = 0
 
   const currentChannel = () => ui.channels.find(({ id }) => id === channelId)
-  const query = () => MENTION_QUERY.exec(input.value.slice(0, input.selectionStart))?.[1]
-  const matches = () => {
-    const typed = query()
-    if (typed === undefined) return []
-    const lowered = typed.toLowerCase()
-    return [...(currentChannel()?.members ?? []).map(({ name }) => name), 'all'].filter((name) =>
-      name.toLowerCase().startsWith(lowered)
-    )
+  const query = () => {
+    const before = input.value.slice(0, input.selectionStart)
+    const command = COMMAND_QUERY.exec(before)
+    if (command && (command[1] || ui.replyTo[channelId])) return { sigil: '/', typed: command[2] }
+    const mention = MENTION_QUERY.exec(before)
+    return mention ? { sigil: '@', typed: mention[1] } : undefined
   }
-  const pick = (name) => {
+  const matches = () => {
+    const found = query()
+    if (!found) return []
+    const lowered = found.typed.toLowerCase()
+    const pool = found.sigil === '/' ? SESSION_COMMANDS : [...(currentChannel()?.members ?? []).map(({ name }) => name), 'all']
+    return pool.filter((name) => name.toLowerCase().startsWith(lowered)).map((name) => `${found.sigil}${name}`)
+  }
+  const pick = (item) => {
     const caret = input.selectionStart
-    const start = caret - (query()?.length ?? 0)
-    input.setRangeText(`${name} `, start, caret, 'end')
+    const start = caret - (query()?.typed.length ?? 0)
+    input.setRangeText(`${item.slice(1)} `, start, caret, 'end')
     input.focus()
     refresh()
   }
@@ -635,7 +643,8 @@ function createComposer(channelId) {
                 pick(name)
               }
             },
-            `@${name}`
+            name,
+            name.startsWith('/') ? h('span', { class: 'suggestion-hint' }, t(`composer.command.${name.slice(1)}`)) : null
           )
         )
       )

@@ -93,6 +93,12 @@ export const MESSAGES = {
     'notices.busyElsewhere':
       "[System] @{name}'s session is in use in another console, so nothing was sent. Close it there and send again in a minute.",
     'notices.turnStopped': "[System] Stopped @{name}'s turn.",
+    'notices.sessionCleared': '[System] @{name} starts a new conversation.',
+    'notices.sessionCompacted': "[System] Compacted @{name}'s conversation.",
+    'notices.nothingToCompact': '[System] @{name} has no conversation to compact yet.',
+    'notices.compactUnsupported': '[System] /compact works only for Claude Code members, not @{name}.',
+    'composer.command.clear': 'Start a new conversation',
+    'composer.command.compact': 'Compact the conversation',
     'notices.checkStopped': "[System] Stopped @{name}'s check.",
     'notices.chainBroken':
       '[System] Agents passed work back and forth {limit} times, so the chain was cut. The master has to step in.',
@@ -347,6 +353,12 @@ export const MESSAGES = {
     'notices.busyElsewhere':
       '[System] @{name} 세션을 다른 콘솔에서 쓰고 있어 보내지 않았습니다. 그쪽을 닫고 1분 뒤 다시 보내세요.',
     'notices.turnStopped': '[System] @{name} 턴을 멈췄습니다.',
+    'notices.sessionCleared': '[System] @{name} 새 대화로 시작합니다.',
+    'notices.sessionCompacted': '[System] @{name} 대화를 압축했습니다.',
+    'notices.nothingToCompact': '[System] @{name}는 아직 압축할 대화가 없습니다.',
+    'notices.compactUnsupported': '[System] /compact는 Claude Code 멤버만 쓸 수 있습니다. @{name}는 해당되지 않습니다.',
+    'composer.command.clear': '새 대화 시작',
+    'composer.command.compact': '대화 압축',
     'notices.checkStopped': '[System] @{name} 검사를 멈췄습니다.',
     'notices.chainBroken':
       '[System] 에이전트끼리 {limit}번 주고받아 체인을 끊었습니다. 주인이 다시 지시해야 이어갑니다.',

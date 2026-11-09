@@ -118,6 +118,15 @@ const conductor = createConductor({
   // A turn that already ended would take the words as a new turn nobody reads back, so they wait instead.
   canInject: (member) => terminals.statusOf(member.id)?.state === 'working',
   inject: (member, prompt) => terminals.inject(member.id, prompt),
+  // An open TUI keeps the old conversation in memory, so it closes first; reopening resumes the new state.
+  sessionCommand(member, command, args, signal) {
+    if (command === 'clear') {
+      clearSession(member)
+      return Promise.resolve({ ok: true, text: '' })
+    }
+    terminals.close(member.id)
+    return runTurn(member, `/compact ${args}`.trim(), () => {}, signal)
+  },
   runCheck: runShellCheck,
   async readSession(member) {
     const path = member.sessionId ? await findTranscript(member.harness, member.sessionId) : null
@@ -215,6 +224,14 @@ function requireMemberName(channel: Channel, value: unknown, renaming?: string):
     throw new HttpError(400, 'nameTaken')
   }
   return name
+}
+
+/** Claude Code's /clear for a member: its next turn starts a new session with the room briefing; files stay. */
+function clearSession(member: Member): void {
+  terminals.close(member.id)
+  member.sessionId = undefined
+  member.contextTokens = undefined
+  member.windowTokens = undefined
 }
 
 async function addMember(channel: Channel, body: Record<string, unknown>): Promise<Member> {
@@ -475,15 +492,11 @@ async function handleApi(
     return sendJson(response, 200, {})
   }
   if (parts[1] === 'members' && parts[3] === 'reset') {
-    // Claude Code's /clear for a member: its next turn starts a new session with the room briefing; files stay.
     const { member } = memberById(id)
     if (conductor.activityOf()[id]) {
       throw new HttpError(409, 'busy')
     }
-    terminals.close(id)
-    member.sessionId = undefined
-    member.contextTokens = undefined
-    member.windowTokens = undefined
+    clearSession(member)
     publishState()
     return sendJson(response, 200, {})
   }

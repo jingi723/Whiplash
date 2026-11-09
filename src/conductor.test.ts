@@ -40,6 +40,7 @@ function conduct(state: State, runTurn: RunTurn, overrides: Partial<ConductorDep
     runTurn,
     readSession: async () => null,
     runCheck: async () => null,
+    sessionCommand: async () => ({ ok: true, text: '' }),
     onStudioEvent: () => {},
     onChange: () => {
       changes += 1
@@ -240,6 +241,63 @@ describe('conductor', () => {
     await done
     assert.equal(notices(state).at(-1), 'turnStopped')
     assert.ok(!channel.messages.some(({ alertMemberId }) => alertMemberId))
+  })
+
+  it('runs `@name /compact` after the running turn, and the command never reaches a prompt', async () => {
+    const state = room()
+    const channel = state.channels[0]
+    channel.members[0].sessionId = 's'
+    const order: string[] = []
+    const prompts: string[] = []
+    const { conductor, idle } = conduct(
+      state,
+      async (_member, prompt) => {
+        prompts.push(prompt)
+        order.push('turn')
+        await new Promise((resolve) => setTimeout(resolve, 10))
+        return { ok: true, text: '답', sessionId: 's' }
+      },
+      {
+        sessionCommand: async (_member, command, args) => {
+          order.push(`${command}:${args}`)
+          return { ok: true, text: '' }
+        }
+      }
+    )
+    const done = idle()
+    conductor.sendHumanMessage(channel, '@Coder 해')
+    await new Promise((resolve) => setTimeout(resolve, 3))
+    conductor.sendHumanMessage(channel, '@Coder /compact 테스트 위주로')
+    conductor.sendHumanMessage(channel, '@Coder 다음')
+    await done
+    assert.deepEqual(order, ['turn', 'compact:테스트 위주로', 'turn'])
+    assert.ok(!prompts[1].includes('/compact'))
+    assert.ok(notices(state).includes('sessionCompacted'))
+  })
+
+  it('reads `/clear` only right after @names, and answers /compact without a session', async () => {
+    const state = room()
+    const channel = state.channels[0]
+    const prompts: string[] = []
+    const { conductor, idle } = conduct(state, async (_member, prompt) => {
+      prompts.push(prompt)
+      return { ok: true, text: '답' }
+    })
+    let done = idle()
+    conductor.sendHumanMessage(channel, '@Coder /clear')
+    await done
+    assert.equal(notices(state).at(-1), 'sessionCleared')
+    done = idle()
+    conductor.sendHumanMessage(channel, '@Reviewer /compact')
+    await done
+    assert.equal(notices(state).at(-1), 'nothingToCompact')
+    done = idle()
+    conductor.sendHumanMessage(channel, '@Coder 이거 /clear 해')
+    await done
+    done = idle()
+    conductor.sendHumanMessage(channel, '@Coder /clear 말고 이거 해')
+    await done
+    assert.equal(prompts.length, 2)
   })
 })
 

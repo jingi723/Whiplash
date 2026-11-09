@@ -465,6 +465,11 @@ button.who:hover {
   color: var(--brand);
 }
 
+.suggestion-hint {
+  margin-left: 12px;
+  color: var(--muted);
+}
+
 .tag {
   flex: none;
   color: var(--muted);

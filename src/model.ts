@@ -58,6 +58,8 @@ export type Message = {
   notice?: Notice
   /** What `[Image #1]` and `[Pasted text #1 +N lines]` in `text` stand for, as Claude Code shows pastes. */
   attachments?: Attachment[]
+  /** A `/clear` or `/compact` for named members: shown in the room, never sent to an agent as words. */
+  command?: true
 }
 
 export type Attachment = { token: string; kind: 'image'; path: string } | { token: string; kind: 'text'; text: string }
@@ -169,6 +171,19 @@ export function planHandoffs(
   return { names: chainBroken ? [] : names, chainBroken }
 }
 
+export type SessionCommand = { names: string[]; command: 'clear' | 'compact'; args: string }
+
+/** `@Name /clear` or `@Name /compact [focus]`: Claude Code's own commands, run on the named members' sessions. */
+export function parseSessionCommand(text: string, names: readonly string[]): SessionCommand | null {
+  // Words after /clear would be lost with the old conversation, so that is read as an ordinary message.
+  const match = /^((?:@[\p{L}\p{N}_-]+\s+)+)\/(clear|compact(?=\s|$))\s*([\s\S]*)$/u.exec(text.trim())
+  if (match?.[2] === 'clear' && match[3]) return null
+  const found = match ? findMentions(match[1], names) : []
+  return match && found.length
+    ? { names: found, command: match[2] as SessionCommand['command'], args: (match[3] ?? '').trim() }
+    : null
+}
+
 /** `/tempo @Name why` rejects a member's work; everything else is an ordinary message. */
 export function parseTempoCommand(text: string): { name: string; reason: string } | null {
   const match = /^\/tempo\s+@([\p{L}\p{N}_-]+)\s*([\s\S]*)$/u.exec(text.trim())
@@ -202,7 +217,8 @@ export function buildTurnPrompt(channel: Channel, member: Member): string {
   })
   const unseen = channel.messages
     .filter(
-      ({ seq, author }) =>
+      ({ seq, author, command }) =>
+        !command &&
         seq > (fresh ? 0 : deliveredThrough(channel, member)) &&
         (fresh || !(author.kind === 'agent' && author.memberId === member.id))
     )
