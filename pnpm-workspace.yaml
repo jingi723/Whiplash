@@ -2,3 +2,4 @@ allowBuilds:
   node-pty: true
   electron: true
   electron-winstaller: false
+  agent-browser: false

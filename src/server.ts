@@ -368,14 +368,15 @@ async function handleApi(
     memberById(id)
     return openTerminalStream(request, response, id)
   }
+  // Before the folder views below, which would read `browser` as one of theirs.
+  if (request.method === 'GET' && parts[1] === 'members' && parts[3] === 'browser' && parts[4] === 'stream') {
+    memberById(id)
+    return openBrowserStream(request, response, id)
+  }
   if (request.method === 'GET' && (parts[1] === 'channels' || parts[1] === 'members') && parts[3]) {
     // The side panels look at the folder the open tab works in: the channel's, or the agent's own.
     const folder = parts[1] === 'channels' ? folderChannelById(id).cwd : projectFolder(memberById(id).member)
     return sendJson(response, 200, await readFolder(folder, parts[3], url.searchParams))
-  }
-  if (request.method === 'GET' && parts[1] === 'members' && parts[3] === 'browser' && parts[4] === 'stream') {
-    memberById(id)
-    return openBrowserStream(request, response, id)
   }
   if (request.method !== 'POST') {
     throw new HttpError(404, 'notFound')

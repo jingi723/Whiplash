@@ -105,7 +105,8 @@ export async function closeBrowser(memberId: string): Promise<void> {
  * one against it. The session name keeps each member's agent-browser daemon apart.
  */
 export function writeBrowserWrapper(): void {
-  const real = join(ROOT_DIR, 'node_modules', '.bin', 'agent-browser')
+  // The native binary itself, not the node shim: an app opened from Finder may have no node on its PATH.
+  const real = join(ROOT_DIR, 'node_modules', 'agent-browser', 'bin', `agent-browser-${process.platform}-${process.arch}${process.platform === 'win32' ? '.exe' : ''}`)
   mkdirSync(browserBin, { recursive: true })
   const path = join(browserBin, 'agent-browser')
   writeFileSync(
