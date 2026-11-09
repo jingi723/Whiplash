@@ -8,7 +8,6 @@ import { fileURLToPath } from 'node:url'
 import { createConductor, runShellCheck } from './conductor.ts'
 import { createWorktree, fileDiff, gitInfo, listFiles, readLog, readProjectFile, resolveInside, searchProject, showCommit } from './git.ts'
 import { claudeAccount, codexAccount } from './accounts.ts'
-import { setTerminalColors } from './terminal-color-queries.ts'
 import { runTurn, type StudioEvent } from './harness.ts'
 import {
   english,
@@ -382,7 +381,7 @@ async function handleApi(
   }
   const body = await readJson(request)
   if (route === 'POST /api/terminal-colors') {
-    setTerminalColors(body)
+    terminals.setColors(body)
     return sendJson(response, 200, {})
   }
   if (route === 'POST /api/channels') {
@@ -595,14 +594,16 @@ const server = createServer((request, response) => {
   })
 })
 
+// Agents left running by the previous server come back before anyone can ask for them.
+await terminals.ready
 server.listen(PORT, HOST, () => {
   console.log(`Whiplash: http://${HOST}:${PORT}`)
 })
 
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   process.on(signal, () => {
+    // Terminals live in the PTY host and keep running; only closing one in the UI ends it.
     conductor.stopAll()
-    terminals.closeAll()
     saver.flush()
     process.exit(0)
   })

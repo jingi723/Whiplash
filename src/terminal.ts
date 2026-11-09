@@ -1,17 +1,20 @@
 import { randomUUID } from 'node:crypto'
-import { chmodSync, existsSync, statSync } from 'node:fs'
+import { spawn } from 'node:child_process'
+import { closeSync, mkdirSync, openSync } from 'node:fs'
 import { open, readdir, stat } from 'node:fs/promises'
-import { createRequire } from 'node:module'
+import { connect, type Socket } from 'node:net'
 import { homedir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { agentEnv } from './env.ts'
 import type { TurnResult } from './harness.ts'
 import { buildAgentPromptPasteBytes, getAgentPromptSubmitDelayMs } from './orca/agent-prompt-injection.ts'
 import { createProgramStatusOscScanner } from './orca/program-status/osc-scanner.ts'
-import { createColorQueryResponder } from './terminal-color-queries.ts'
 import { PROGRAM_STATUS_QUERY_REPLY, type ProgramStatusState } from './orca/program-status/protocol.ts'
 import type { Harness, Member } from './model.ts'
+import { BUFFER_LIMIT, createLineSplitter, PTY_HOST_VERSION, socketPath } from './pty-host.ts'
 import { findTranscript } from './sessions.ts'
+import { whiplashHome } from './store.ts'
 import { parseTranscriptTurn } from './transcript.ts'
 
 type Pty = {
@@ -24,38 +27,59 @@ type Pty = {
   kill: (signal?: string) => void
 }
 
-const require = createRequire(import.meta.url)
-const BUFFER_LIMIT = 256 * 1024
 const POLL_MS = 800
 /** A dialog that reports itself as blocked has clearly swallowed the prompt; no need to wait the full timeout. */
 const BLOCKED_GRACE_MS = 3000
 const SESSION_DISCOVERY_MS = 60_000
 /** A typed prompt shows up in the transcript within seconds unless a dialog swallowed it. */
 const PROMPT_ACCEPT_MS = 20_000
+const HOST_START_MS = 10_000
+const HOST_RECONNECT_MS = 1000
+const HOST_PATH = fileURLToPath(new URL('./pty-host.ts', import.meta.url))
 
-let ptyModule: { spawn: (file: string, args: string[], options: object) => Pty } | null = null
-
-/** node-pty 1.1.0 ships its macOS spawn helper without the execute bit, which fails every spawn.
- *  Same repair as Orca's local-pty-executable-spawn.ts: macOS only, keep the other mode bits, never throw. */
-function loadPty(): NonNullable<typeof ptyModule> {
-  if (ptyModule) {
-    return ptyModule
-  }
-  const root = dirname(require.resolve('node-pty/package.json'))
-  const helper = join(root, 'prebuilds', `${process.platform}-${process.arch}`, 'spawn-helper')
-  try {
-    if (process.platform === 'darwin' && existsSync(helper)) {
-      const mode = statSync(helper).mode
-      if ((mode & 0o111) === 0) {
-        chmodSync(helper, mode | 0o755)
-      }
-    }
-  } catch (error) {
-    console.warn('[whiplash] could not make node-pty spawn-helper executable', error)
-  }
-  ptyModule = require('node-pty')
-  return ptyModule!
+/** Starts the PTY host detached, on our runtime and env (ELECTRON_RUN_AS_NODE included), so it outlives us. */
+function spawnHost(home: string): void {
+  mkdirSync(home, { recursive: true })
+  const log = openSync(join(home, 'pty-host.log'), 'a')
+  spawn(process.execPath, [HOST_PATH], {
+    cwd: home,
+    detached: true,
+    stdio: ['ignore', log, log],
+    env: { ...process.env, WHIPLASH_HOME: home }
+  }).unref()
+  closeSync(log)
 }
+
+const connectOnce = (path: string): Promise<Socket> =>
+  new Promise((resolve, reject) => {
+    const socket = connect(path)
+    socket.once('connect', () => {
+      socket.off('error', reject)
+      resolve(socket)
+    })
+    socket.once('error', reject)
+  })
+
+/** Connects to the host, starting one only when nobody listens; a timeout or unknown error is not a dead host. */
+export async function connectPtyHost(home: string = whiplashHome): Promise<Socket> {
+  const deadline = Date.now() + HOST_START_MS
+  let spawned = false
+  while (true) {
+    try {
+      return await connectOnce(socketPath(home))
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code
+      if (code !== 'ENOENT' && code !== 'ECONNREFUSED') throw error
+      if (!spawned) spawnHost(home)
+      spawned = true
+      if (Date.now() > deadline) throw new Error(`PTY host did not start; see ${join(home, 'pty-host.log')}`)
+      await delay(100)
+    }
+  }
+}
+
+/** What the host keeps beside a session so a restarted server can pick up where it left off. */
+type SessionMeta = { harness: Harness; cwd: string; startedAt: number; sessionId?: string; discover: boolean }
 
 /** The interactive CLI for a member; a new Claude session gets its id up front so Stage can follow it. */
 export function interactiveCommand(
@@ -178,12 +202,95 @@ export function createTerminalHub(
   onSessionId: (memberId: string, sessionId: string) => void,
   onChange: () => void,
   /** A turn typed straight into the terminal finished: its OSC 7501 status left 'working'. */
-  onTurnEnd: (memberId: string) => void = () => {}
+  onTurnEnd: (memberId: string) => void = () => {},
+  home: string = whiplashHome
 ) {
   const sessions = new Map<string, Session>()
+  /** Live PTYs by member id, fed by host events; a session may outlive the server that opened it. */
+  const remotes = new Map<string, { data: (data: string) => void; exit: (code: number) => void }>()
+  let host: Socket | null = null
+
+  const send = (message: object): void => {
+    host?.write(JSON.stringify(message) + '\n')
+  }
+
+  /** A PTY that lives in the host: same shape as node-pty's, every call becomes a request. */
+  function remotePty(id: string, cols: number, rows: number): Pty {
+    let onData = (_data: string): void => {}
+    let onExit = (_event: { exitCode: number }): void => {}
+    remotes.set(id, { data: (data) => onData(data), exit: (exitCode) => onExit({ exitCode }) })
+    const pty: Pty = {
+      cols,
+      rows,
+      onData: (listener) => (onData = listener),
+      onExit: (listener) => (onExit = listener),
+      write: (data) => send({ type: 'write', id, data }),
+      resize(cols, rows) {
+        pty.cols = cols
+        pty.rows = rows
+        send({ type: 'resize', id, cols, rows })
+      },
+      kill: () => send({ type: 'kill', id })
+    }
+    return pty
+  }
 
   function emit(session: Session, event: TerminalEvent): void {
     session.listeners.forEach((listener) => listener(event))
+  }
+
+  /** Follows a PTY's output; `replay` is a reattached session's backlog, read only to recover its last status. */
+  function attach(memberId: string, session: Session, meta: SessionMeta, replay = ''): void {
+    const { pty } = session
+    sessions.set(memberId, session)
+    const scan = createProgramStatusOscScanner()
+    const track = (data: string, live: boolean): void => {
+      for (const event of scan(data)) {
+        if (event.type === 'query') {
+          // Claude reports program status only to a terminal that answers this probe.
+          if (live) pty.write(PROGRAM_STATUS_QUERY_REPLY)
+        } else if (event.type === 'report' && event.report.id === null && event.report.state !== 'clear') {
+          const next: TerminalStatus = { state: event.report.state, ...(event.report.kind ? { kind: event.report.kind } : {}) }
+          if (next.state !== session.status?.state || next.kind !== session.status?.kind) {
+            if (live && session.status?.state === 'working' && next.state !== 'working') onTurnEnd(memberId)
+            session.status = next
+            if (live) onChange()
+          }
+        } else if (event.type === 'report' && event.report.id === null) {
+          session.status = undefined
+          if (live) onChange()
+        }
+      }
+    }
+    track(replay, false)
+    pty.onData((data) => {
+      session.buffer = (session.buffer + data).slice(-BUFFER_LIMIT)
+      emit(session, { type: 'data', data })
+      track(data, true)
+    })
+    pty.onExit(({ exitCode }) => {
+      remotes.delete(memberId)
+      sessions.delete(memberId)
+      emit(session, { type: 'exit', code: exitCode })
+      onChange()
+    })
+    if (meta.discover) {
+      // A pinned id is only recorded once the CLI writes it; a terminal closed before the first prompt leaves nothing to resume.
+      void (async () => {
+        while (Date.now() - meta.startedAt < SESSION_DISCOVERY_MS && sessions.get(memberId) === session) {
+          await delay(2000)
+          const found = meta.sessionId
+            ? (await findTranscript(meta.harness, meta.sessionId)) && meta.sessionId
+            : await findNewCodexSession(meta.cwd, meta.startedAt)
+          if (found) {
+            session.sessionId = found
+            onSessionId(memberId, found)
+            return
+          }
+        }
+      })()
+    }
+    onChange()
   }
 
   function openTerminal(member: Member, cols: number, rows: number): void {
@@ -191,62 +298,77 @@ export function createTerminalHub(
       sessions.get(member.id)!.pty.resize(cols, rows)
       return
     }
+    if (!host) throw new Error('PTY host is not connected')
     const { command, args, sessionId } = interactiveCommand(member)
-    const startedAt = Date.now()
-    const pty = loadPty().spawn(command, args, {
-      name: 'xterm-256color',
+    const meta: SessionMeta = {
+      harness: member.harness,
+      cwd: member.cwd,
+      startedAt: Date.now(),
+      sessionId,
+      discover: sessionId !== member.sessionId || !sessionId
+    }
+    const pty = remotePty(member.id, cols, rows)
+    send({
+      type: 'open',
+      id: member.id,
+      command,
+      args,
+      cwd: member.cwd,
+      env: { ...agentEnv(), TERM: 'xterm-256color', COLORTERM: 'truecolor' },
       cols,
       rows,
-      cwd: member.cwd,
-      env: { ...agentEnv(), TERM: 'xterm-256color', COLORTERM: 'truecolor' }
+      meta
     })
-    const session: Session = { pty, buffer: '', listeners: new Set(), sessionId }
-    sessions.set(member.id, session)
-    const scan = createProgramStatusOscScanner()
-    const answerColorQueries = createColorQueryResponder((reply) => pty.write(reply))
-    pty.onData((raw) => {
-      const data = answerColorQueries(raw)
-      session.buffer = (session.buffer + data).slice(-BUFFER_LIMIT)
-      emit(session, { type: 'data', data })
-      for (const event of scan(data)) {
-        if (event.type === 'query') {
-          // Claude reports program status only to a terminal that answers this probe.
-          pty.write(PROGRAM_STATUS_QUERY_REPLY)
-        } else if (event.type === 'report' && event.report.id === null && event.report.state !== 'clear') {
-          const next: TerminalStatus = { state: event.report.state, ...(event.report.kind ? { kind: event.report.kind } : {}) }
-          if (next.state !== session.status?.state || next.kind !== session.status?.kind) {
-            if (session.status?.state === 'working' && next.state !== 'working') onTurnEnd(member.id)
-            session.status = next
-            onChange()
+    attach(member.id, { pty, buffer: '', listeners: new Set(), sessionId }, meta)
+  }
+
+  /** Connects (starting the host if needed) and takes back every session still running there. */
+  async function connectHost(): Promise<void> {
+    const socket = await connectPtyHost(home)
+    socket.setEncoding('utf8')
+    let listed = (): void => {}
+    const relisted = new Promise<void>((resolve) => {
+      listed = resolve
+      socket.on(
+        'data',
+        createLineSplitter((line) => {
+          const message = JSON.parse(line)
+          if (message.type === 'data') remotes.get(message.id)?.data(message.data)
+          else if (message.type === 'exit') remotes.get(message.id)?.exit(message.code)
+          else if (message.type === 'hello' && message.version !== PTY_HOST_VERSION) {
+            console.warn(`[whiplash] PTY host speaks protocol ${message.version}, server ${PTY_HOST_VERSION}; restart it when no agent is working`)
+          } else if (message.type === 'list') {
+            // Output sent before this reply is already in each backlog; ids were unknown until now, so nothing is doubled.
+            for (const { id, cols, rows, buffer, meta } of message.sessions as { id: string; cols: number; rows: number; buffer: string; meta: SessionMeta }[]) {
+              if (sessions.has(id)) continue
+              const pty = remotePty(id, cols, rows)
+              attach(id, { pty, buffer, listeners: new Set(), sessionId: meta.sessionId }, meta, buffer)
+            }
+            resolve()
           }
-        } else if (event.type === 'report' && event.report.id === null) {
-          session.status = undefined
-          onChange()
-        }
-      }
+        })
+      )
     })
-    pty.onExit(({ exitCode }) => {
-      sessions.delete(member.id)
-      emit(session, { type: 'exit', code: exitCode })
-      onChange()
+    socket.on('error', (error) => console.warn('[whiplash] PTY host connection', error.message))
+    socket.on('close', () => {
+      listed()
+      if (host !== socket) return
+      host = null
+      // The host itself went away, and its PTYs with it.
+      for (const remote of [...remotes.values()]) remote.exit(-1)
+      reconnect()
     })
-    if (sessionId !== member.sessionId || !sessionId) {
-      // A pinned id is only recorded once the CLI writes it; a terminal closed before the first prompt leaves nothing to resume.
-      void (async () => {
-        for (let waited = 0; waited < SESSION_DISCOVERY_MS && sessions.get(member.id) === session; waited += 2000) {
-          await delay(2000)
-          const found = sessionId
-            ? (await findTranscript(member.harness, sessionId)) && sessionId
-            : await findNewCodexSession(member.cwd, startedAt)
-          if (found) {
-            session.sessionId = found
-            onSessionId(member.id, found)
-            return
-          }
-        }
-      })()
-    }
-    onChange()
+    host = socket
+    send({ type: 'hello', version: PTY_HOST_VERSION })
+    send({ type: 'list' })
+    await relisted
+  }
+
+  function reconnect(): void {
+    setTimeout(() => connectHost().catch((error) => {
+      console.error('[whiplash] PTY host', error)
+      reconnect()
+    }), HOST_RECONNECT_MS)
   }
 
   /**
@@ -336,9 +458,12 @@ export function createTerminalHub(
     close(memberId: string): void {
       sessions.get(memberId)?.pty.kill('SIGHUP')
     },
-    closeAll(): void {
-      sessions.forEach((session) => session.pty.kill('SIGHUP'))
+    /** The host answers the CLIs' color queries, so it needs the viewer's theme. */
+    setColors(colors: unknown): void {
+      send({ ...(colors as object), type: 'colors' })
     },
+    /** Resolves once every session still running in the host is attached again. */
+    ready: connectHost(),
     /** Replays recent output first, so a reload shows the screen as it was. */
     subscribe(memberId: string, listener: (event: TerminalEvent) => void): (() => void) | null {
       const session = sessions.get(memberId)
