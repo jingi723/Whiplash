@@ -1519,7 +1519,7 @@ function closeTab(channel, key) {
   const index = entry.open.findIndex((tab) => tab.key === key)
   if (index < 0) return
   entry.open.splice(index, 1)
-  docs.delete(key)
+  dropDoc(key)
   if (entry.active === key) entry.active = (entry.open[index] ?? entry.open[index - 1])?.key ?? 'stage'
   saveTabs()
   render()
@@ -1546,7 +1546,7 @@ function tabTitle(channel, tab) {
 
 function closeOtherTabs(channel, keep) {
   const entry = channelTabs(channel)
-  for (const tab of entry.open) if (tab.key !== keep) docs.delete(tab.key)
+  for (const tab of entry.open) if (tab.key !== keep) dropDoc(tab.key)
   entry.open = entry.open.filter((tab) => tab.key === keep)
   entry.active = keep
   saveTabs()
@@ -1582,7 +1582,7 @@ function renderTabs(channel, active) {
       return h(
         'div',
         {
-          class: `tab${member && isUnread(member) ? ' unread' : ''}`,
+          class: `tab${member && isUnread(member) ? ' unread' : ''}${docs.get(tab.key)?.editor?.dirty ? ' dirty' : ''}`,
           role: 'tab',
           tabindex: 0,
           'aria-selected': String(tab.key === active.key),
@@ -1633,7 +1633,7 @@ function renderBrowser(tab) {
   if (main.firstChild !== browserView.node) main.replaceChildren(browserView.node)
 }
 
-// --- Documents: read-only views of files, diffs and commits, kept while their tab stays open.
+// --- Documents: files open editable; diffs and commits read-only. Kept while their tab stays open.
 const docs = new Map()
 
 function apiPath(scope, view, params = {}) {
@@ -1663,15 +1663,21 @@ function renderDocument(tab) {
   if (!doc) {
     const body = h('pre', { class: 'document' }, h('div', { class: 'document-note' }, t('studio.loading')))
     const heading = tab.type === 'commit' ? `${tab.short}  ${tab.subject ?? ''}` : tab.path
+    const status = h('span', { class: 'doc-status', role: 'status' })
+    const banner = h('div', { class: 'doc-banner', role: 'alert', hidden: true })
     const node = h(
       'section',
       { class: 'studio-page' },
-      h('div', { class: 'page-toolbar' }, icon(TAB_ICONS[tab.type]), h('span', { class: 'path', title: heading }, heading)),
+      h('div', { class: 'page-toolbar' }, icon(TAB_ICONS[tab.type]), h('span', { class: 'path', title: heading }, heading), status),
+      banner,
       body
     )
-    doc = { node, body, line: null, loaded: false }
+    doc = { tab, node, body, status, banner, line: null, loaded: false }
     docs.set(tab.key, doc)
     void loadDocument(tab, doc)
+  } else if (main.firstChild !== doc.node) {
+    // Back on the tab: an agent may have changed the file meanwhile.
+    void checkDisk(doc)
   }
   if (main.firstChild !== doc.node) main.replaceChildren(doc.node)
   if (doc.loaded && tab.line && doc.line !== tab.line) revealLine(doc, tab.line)
@@ -1684,7 +1690,7 @@ async function loadDocument(tab, doc) {
       const file = await api(apiPath(tab.scope, 'file', { path: tab.path }))
       if (file.binary) return note(t('doc.binary'))
       if (file.tooLarge) return note(t('doc.tooLarge', { size: `${Math.round(file.size / 1024)} KB` }))
-      doc.body.replaceChildren(...lineRows(file.text))
+      mountEditor(doc, file)
     } else if (tab.type === 'diff') {
       const { diff } = await api(apiPath(tab.scope, 'diff', { path: tab.path }))
       doc.body.replaceChildren(...lineRows(diff, diffClass))
@@ -1703,6 +1709,15 @@ async function loadDocument(tab, doc) {
 
 function revealLine(doc, line) {
   doc.line = line
+  if (doc.editor) {
+    const { area } = doc.editor
+    const lines = area.value.split('\n')
+    const start = lines.slice(0, line - 1).reduce((sum, text) => sum + text.length + 1, 0)
+    area.focus()
+    area.setSelectionRange(start, start + (lines[line - 1]?.length ?? 0))
+    area.scrollTop = (line - 1) * parseFloat(getComputedStyle(area).lineHeight) - area.clientHeight / 2
+    return
+  }
   doc.body.querySelector('.ln.target')?.classList.remove('target')
   const row = doc.body.children[line - 1]
   row?.classList.add('target')
@@ -1710,10 +1725,160 @@ function revealLine(doc, line) {
 }
 
 function openDocument(scope, tab) {
-  // Opening from a panel always shows the file as it is now.
-  docs.delete(tab.key)
+  // Opening from a panel always shows the file as it is now; an open editor checks the disk instead of dropping edits.
+  const doc = docs.get(tab.key)
+  // The check may swap in new text, so the line is found again after it.
+  if (doc?.editor) void checkDisk(doc).then(() => tab.line && revealLine(doc, tab.line))
+  else docs.delete(tab.key)
   openTab(currentChannel(), { ...tab, scope })
 }
+
+/** Closing a tab saves what is left unsaved, then forgets it. */
+function dropDoc(key) {
+  const doc = docs.get(key)
+  if (doc?.editor) void saveDoc(doc)
+  docs.delete(key)
+}
+
+// --- Editor: a plain textarea over the file, saved on ⌘S and a second after typing stops (as Orca does).
+const AUTOSAVE_MS = 1000
+
+function mountEditor(doc, file) {
+  const gutter = h('div', { class: 'gutter', 'aria-hidden': 'true' })
+  const area = h('textarea', { class: 'code', wrap: 'off', spellcheck: 'false', autocapitalize: 'off', autocomplete: 'off', 'aria-label': doc.tab.path })
+  const editor = h('div', { class: 'document editor' }, gutter, area)
+  doc.body.replaceWith(editor)
+  doc.body = editor
+  doc.editor = { area, gutter, lines: 0, saved: '', version: '', eol: '\n', indent: '  ', timer: 0, saving: false, dirty: false, conflict: null }
+  setEditorText(doc, file)
+  area.addEventListener('input', () => {
+    updateGutter(doc.editor)
+    markDirty(doc)
+    clearTimeout(doc.editor.timer)
+    doc.editor.timer = setTimeout(() => saveDoc(doc), AUTOSAVE_MS)
+  })
+  area.addEventListener('scroll', () => (gutter.scrollTop = area.scrollTop))
+  area.addEventListener('keydown', (event) => {
+    const mod = isMac ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey
+    if (mod && event.key.toLowerCase() === 's') {
+      event.preventDefault()
+      void saveDoc(doc)
+    } else if (event.key === 'Tab' && !mod && !event.shiftKey && !event.altKey) {
+      // insertText keeps the browser's undo history.
+      event.preventDefault()
+      document.execCommand('insertText', false, doc.editor.indent)
+    }
+  })
+}
+
+function setEditorText(doc, file) {
+  const editor = doc.editor
+  const { area } = editor
+  const { selectionStart, selectionEnd, scrollTop, scrollLeft } = area
+  // A textarea turns CRLF into LF; remember it so a save writes the file's own line endings back.
+  editor.eol = file.text.includes('\r\n') ? '\r\n' : '\n'
+  editor.indent = /^\t/m.test(file.text) ? '\t' : '  '
+  area.value = file.text
+  editor.saved = area.value
+  editor.version = file.version
+  area.setSelectionRange(selectionStart, selectionEnd)
+  area.scrollTop = scrollTop
+  area.scrollLeft = scrollLeft
+  updateGutter(editor)
+  markDirty(doc)
+}
+
+function updateGutter(editor) {
+  const lines = editor.area.value.split('\n').length
+  if (lines === editor.lines) return
+  editor.lines = lines
+  editor.gutter.textContent = Array.from({ length: lines }, (_, index) => index + 1).join('\n')
+  editor.gutter.scrollTop = editor.area.scrollTop
+}
+
+/** The tab shows a dot while the editor holds text the disk does not. */
+function markDirty(doc) {
+  const dirty = doc.editor.area.value !== doc.editor.saved
+  if (dirty === doc.editor.dirty) return
+  doc.editor.dirty = dirty
+  if (docs.get(doc.tab.key) === doc) render()
+}
+
+async function saveDoc(doc, keepalive = false) {
+  const editor = doc.editor
+  clearTimeout(editor.timer)
+  if (editor.conflict || editor.area.value === editor.saved) return
+  if (editor.saving) {
+    editor.timer = setTimeout(() => saveDoc(doc), AUTOSAVE_MS)
+    return
+  }
+  const text = editor.area.value
+  editor.saving = true
+  try {
+    const response = await fetch(`/api/${apiPath(doc.tab.scope, 'file')}`, {
+      method: 'POST',
+      keepalive,
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ path: doc.tab.path, text: text.replaceAll('\n', editor.eol), version: editor.version })
+    })
+    const data = await response.json()
+    if (response.status === 409) {
+      const disk = await api(apiPath(doc.tab.scope, 'file', { path: doc.tab.path }))
+      if (disk.version) showConflict(doc, disk)
+      return
+    }
+    if (!response.ok) throw new Error(t(`errors.${data.error}`))
+    editor.version = data.version
+    editor.saved = text
+    doc.status.textContent = ''
+  } catch (error) {
+    doc.status.textContent = error.message
+  } finally {
+    editor.saving = false
+    markDirty(doc)
+  }
+}
+
+/** Reloads a clean editor when the file changed on disk; a dirty one asks which side wins. */
+async function checkDisk(doc) {
+  const editor = doc.editor
+  if (!editor || editor.saving || editor.conflict) return
+  const disk = await api(apiPath(doc.tab.scope, 'file', { path: doc.tab.path })).catch(() => null)
+  if (!disk?.version || disk.version === editor.version || editor.saving || editor.conflict) return
+  if (editor.area.value === editor.saved) setEditorText(doc, disk)
+  else showConflict(doc, disk)
+}
+
+function showConflict(doc, disk) {
+  const editor = doc.editor
+  clearTimeout(editor.timer)
+  editor.conflict = disk
+  const resolve = (keepMine) => {
+    editor.conflict = null
+    doc.banner.hidden = true
+    if (keepMine) {
+      editor.version = disk.version
+      void saveDoc(doc)
+    } else {
+      setEditorText(doc, disk)
+    }
+  }
+  doc.banner.replaceChildren(
+    h('span', {}, t('doc.changed')),
+    h('button', { class: 'ghost', type: 'button', onClick: () => resolve(true) }, t('doc.keepMine')),
+    h('button', { class: 'ghost', type: 'button', onClick: () => resolve(false) }, t('doc.reload'))
+  )
+  doc.banner.hidden = false
+}
+
+const checkEditors = () => {
+  for (const doc of docs.values()) if (doc.editor) void checkDisk(doc)
+}
+window.addEventListener('focus', checkEditors)
+// Leaving the page (⌘R, quit) inside the autosave second still sends the edit; keepalive outlives the page.
+window.addEventListener('pagehide', () => {
+  for (const doc of docs.values()) if (doc.editor) void saveDoc(doc, true)
+})
 
 const scopeKeyOf = (scope) => `${scope.kind}/${scope.id}`
 const openFile = (scope, path, line) => openDocument(scope, { key: `file:${scopeKeyOf(scope)}:${path}`, type: 'file', path, line })
@@ -2623,7 +2788,8 @@ const events = new EventSource('/api/events')
 events.addEventListener('state', (event) => {
   const next = JSON.parse(event.data)
   // A finished turn may have changed files and commits; the side panel reloads on its next render.
-  if (Object.keys(ui.activity).some((id) => !next.activity[id])) panelStale = true
+  const turnEnded = Object.keys(ui.activity).some((id) => !next.activity[id])
+  if (turnEnded) panelStale = true
   ui.channels = next.channels
   ui.activity = next.activity
   ui.queued = next.queued ?? []
@@ -2632,6 +2798,7 @@ events.addEventListener('state', (event) => {
   notifyChanges()
   render()
   updateBadge()
+  if (turnEnded) checkEditors()
 })
 events.addEventListener('log', (event) => {
   const { memberId, entry } = JSON.parse(event.data)

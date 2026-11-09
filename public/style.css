@@ -2148,6 +2148,71 @@ kbd {
   color: var(--muted);
 }
 
+/* The file editor: a line-number gutter scrolled along with a plain textarea. */
+.document.editor {
+  display: flex;
+  padding: 0;
+  overflow: hidden;
+}
+
+.editor .gutter {
+  flex: none;
+  width: 52px;
+  /* Extra bottom room so it can scroll as far as the textarea with its scrollbar. */
+  padding: 8px 14px 32px 0;
+  overflow: hidden;
+  color: color-mix(in srgb, var(--muted) 60%, transparent);
+  text-align: right;
+  white-space: pre;
+  user-select: none;
+}
+
+.editor .code {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  padding: 8px 24px 8px 0;
+  border: 0;
+  outline: none;
+  resize: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  tab-size: 4;
+  white-space: pre;
+  overflow: auto;
+}
+
+.doc-status {
+  margin-left: auto;
+  color: var(--danger);
+  white-space: nowrap;
+}
+
+.doc-banner {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 14px;
+  border-bottom: 1px solid var(--line);
+  background: var(--danger-soft);
+  font-size: 12px;
+}
+
+.doc-banner[hidden] {
+  display: none;
+}
+
+.doc-banner .ghost {
+  padding: 3px 9px;
+  font-size: 12px;
+}
+
+.tab.dirty .tab-label::after {
+  content: ' ●';
+}
+
 /* Status bar: Orca's 24px strip. */
 .statusbar {
   display: flex;
