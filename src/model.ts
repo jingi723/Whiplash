@@ -39,6 +39,9 @@ export type Member = {
   lastTurnEndedAt?: number
   /** Kept at the top of its channel in the list, as Orca pins workspaces. */
   pinned?: boolean
+  /** Unset means the CLI's own default from its settings. */
+  model?: string
+  effort?: string
 }
 
 export type Author =
@@ -171,12 +174,20 @@ export function planHandoffs(
   return { names: chainBroken ? [] : names, chainBroken }
 }
 
-export type SessionCommand = { names: string[]; command: 'clear' | 'compact'; args: string }
+export type SessionCommand = { names: string[]; command: 'clear' | 'compact' | 'model'; args: string }
 
-/** `@Name /clear` or `@Name /compact [focus]`: Claude Code's own commands, run on the named members' sessions. */
+/** CLI flags for a member's chosen model and effort. */
+export function modelArgs({ harness, model, effort }: Pick<Member, 'harness' | 'model' | 'effort'>): string[] {
+  if (harness === 'claude') {
+    return [...(model ? ['--model', model] : []), ...(effort ? ['--effort', effort] : [])]
+  }
+  return [...(model ? ['-m', model] : []), ...(effort ? ['-c', `model_reasoning_effort="${effort}"`] : [])]
+}
+
+/** `@Name /clear`, `/compact [focus]` or `/model <model> [effort]`: run on the named members' sessions. */
 export function parseSessionCommand(text: string, names: readonly string[]): SessionCommand | null {
   // Words after /clear would be lost with the old conversation, so that is read as an ordinary message.
-  const match = /^((?:@[\p{L}\p{N}_-]+\s+)+)\/(clear|compact(?=\s|$))\s*([\s\S]*)$/u.exec(text.trim())
+  const match = /^((?:@[\p{L}\p{N}_-]+\s+)+)\/(clear|compact(?=\s|$)|model(?=\s|$))\s*([\s\S]*)$/u.exec(text.trim())
   if (match?.[2] === 'clear' && match[3]) return null
   const found = match ? findMentions(match[1], names) : []
   return match && found.length

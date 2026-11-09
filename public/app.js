@@ -18,7 +18,22 @@ const LIVE_SESSION_MS = 120_000
 const MENTION_QUERY = /(?:^|\s)@([\p{L}\p{N}_-]*)$/u
 // `@name /clear` runs Claude Code's command on that member; the reply chip stands in for the @name.
 const COMMAND_QUERY = /^((?:@[\p{L}\p{N}_-]+\s+)*)\/([a-z]*)$/u
-const SESSION_COMMANDS = ['clear', 'compact']
+// `/model` then asks for a model and an effort, as the terminal's picker does.
+const MODEL_QUERY = /^((?:@[\p{L}\p{N}_-]+\s+)*)\/model\s+(?:(\S+)\s+)?(\S*)$/u
+const SESSION_COMMANDS = ['clear', 'compact', 'model']
+let modelLists = null
+let modelsLoading = null
+/** The model lists change only with CLI updates, so they load once and then call back whoever waited. */
+function loadModels(onLoad) {
+  modelsLoading ??= api('models').then((lists) => (modelLists = lists))
+  modelsLoading.then(onLoad, () => (modelsLoading = null))
+}
+/** What a member runs now: its own choice, or the CLI default from its settings. */
+function modelOf(member, lists) {
+  const list = lists?.[member.harness]
+  const id = member.model ?? list?.model
+  return { list, id, label: list?.models.find((model) => model.id === id || model.id.includes(`-${id}-`))?.label ?? id, effort: member.effort ?? list?.effort }
+}
 const NEAR_BOTTOM_PX = 120
 
 const ui = {
@@ -603,25 +618,71 @@ function createComposer(channelId) {
   let active = 0
 
   const currentChannel = () => ui.channels.find(({ id }) => id === channelId)
+  const targetOf = (names) => {
+    const members = currentChannel()?.members ?? []
+    const first = /@([\p{L}\p{N}_-]+)/u.exec(names)?.[1]?.toLowerCase()
+    return first ? members.find(({ name }) => name.toLowerCase() === first) : members.find(({ id }) => id === ui.replyTo[channelId])
+  }
+  /** The word being typed and what can complete it: a member, a command, a model, then an effort. */
   const query = () => {
     const before = input.value.slice(0, input.selectionStart)
+    const addressed = (names) => names || ui.replyTo[channelId]
+    const model = MODEL_QUERY.exec(before)
+    if (model && addressed(model[1])) {
+      const member = targetOf(model[1])
+      if (!member || !modelLists) {
+        if (member) loadModels(refresh)
+        return { typed: model[3], items: [] }
+      }
+      const current = modelOf(member, modelLists)
+      const fallback = t('composer.model.default')
+      if (!model[2]) {
+        return {
+          typed: model[3],
+          items: [{ insert: 'default', label: fallback, hint: current.list?.model }, ...current.list.models.map(({ id, label }) => ({ insert: id, label, hint: id === current.id ? '✓' : '' }))]
+        }
+      }
+      const chosen = current.list.models.find(({ id }) => id === model[2])
+      const efforts = chosen?.efforts ?? current.list.models[0]?.efforts ?? []
+      return {
+        typed: model[3],
+        last: true,
+        items: [{ insert: 'default', label: fallback, hint: current.list?.effort }, ...efforts.map((effort) => ({ insert: effort, label: effort, hint: effort === current.effort ? '✓' : '' }))]
+      }
+    }
     const command = COMMAND_QUERY.exec(before)
-    if (command && (command[1] || ui.replyTo[channelId])) return { sigil: '/', typed: command[2] }
+    if (command && addressed(command[1])) {
+      return { typed: command[2], items: SESSION_COMMANDS.map((name) => ({ insert: name, label: `/${name}`, hint: t(`composer.command.${name}`) })) }
+    }
     const mention = MENTION_QUERY.exec(before)
-    return mention ? { sigil: '@', typed: mention[1] } : undefined
+    if (!mention) return undefined
+    const names = [...(currentChannel()?.members ?? []).map(({ name }) => name), 'all']
+    return { typed: mention[1], items: names.map((name) => ({ insert: name, label: `@${name}` })) }
   }
   const matches = () => {
     const found = query()
     if (!found) return []
     const lowered = found.typed.toLowerCase()
-    const pool = found.sigil === '/' ? SESSION_COMMANDS : [...(currentChannel()?.members ?? []).map(({ name }) => name), 'all']
-    return pool.filter((name) => name.toLowerCase().startsWith(lowered)).map((name) => `${found.sigil}${name}`)
+    return found.items
+      .filter(({ insert, label }) => insert.toLowerCase().startsWith(lowered) || label.toLowerCase().startsWith(lowered))
+      .map((item) => ({ ...item, last: found.last }))
   }
   const pick = (item) => {
     const caret = input.selectionStart
     const start = caret - (query()?.typed.length ?? 0)
-    input.setRangeText(`${item.slice(1)} `, start, caret, 'end')
+    input.setRangeText(`${item.insert} `, start, caret, 'end')
     input.focus()
+    active = 0
+    refresh()
+    // The effort is the picker's last step, so choosing it applies the change.
+    if (item.last) void submit()
+  }
+  /** The model chip's click: the same picker, typed for that member. */
+  const pickModel = (name) => {
+    input.value = `@${name} /model `
+    input.setSelectionRange(input.value.length, input.value.length)
+    input.focus()
+    active = 0
     refresh()
   }
   function refresh() {
@@ -629,7 +690,7 @@ function createComposer(channelId) {
     active = Math.min(active, Math.max(options.length - 1, 0))
     list.hidden = options.length === 0
     list.replaceChildren(
-      ...options.map((name, index) =>
+      ...options.map((item, index) =>
         h(
           'li',
           { role: 'option', 'aria-selected': String(index === active) },
@@ -640,11 +701,11 @@ function createComposer(channelId) {
               tabindex: -1,
               onMousedown: (event) => {
                 event.preventDefault()
-                pick(name)
+                pick(item)
               }
             },
-            name,
-            name.startsWith('/') ? h('span', { class: 'suggestion-hint' }, t(`composer.command.${name.slice(1)}`)) : null
+            item.label,
+            item.hint ? h('span', { class: 'suggestion-hint' }, item.hint) : null
           )
         )
       )
@@ -770,7 +831,7 @@ function createComposer(channelId) {
       void submit()
     }
   })
-  return { element: h('div', { class: 'composer' }, list, box), input, list, showTarget, insertPaths }
+  return { element: h('div', { class: 'composer' }, list, box), input, list, showTarget, insertPaths, pickModel }
 }
 
 let targetBeforeClick = {}
@@ -981,6 +1042,18 @@ function promptCard(member) {
 }
 
 // Why the shell stays mounted: moving the textarea in the DOM would cancel a Hangul syllable mid-composition.
+/** Who runs on what; a click opens the composer's /model picker for that member. */
+function modelChip(member, composer) {
+  const { label, effort } = modelOf(member, modelLists)
+  const text = [label, effort].filter(Boolean).join(' · ')
+  return h(
+    'button',
+    { class: 'model-chip', type: 'button', title: t('composer.command.model'), onClick: () => composer.pickModel(member.name) },
+    h('span', { class: 'model-chip-name' }, member.name),
+    text || '…'
+  )
+}
+
 function renderStage(channel) {
   if (shell?.channelId !== channel.id) {
     shell = createShell(channel.id)
@@ -995,8 +1068,10 @@ function renderStage(channel) {
     channel.everyone
       ? h('span', { class: 'path' }, t('stage.everyone', { count: channel.members.length }))
       : h('span', { class: 'path', title: channel.cwd }, channel.cwd),
-    channel.checkCommand && h('span', { class: 'tag', title: t('stage.checkTitle') }, t('stage.check', { command: channel.checkCommand }))
+    channel.checkCommand && h('span', { class: 'tag', title: t('stage.checkTitle') }, t('stage.check', { command: channel.checkCommand })),
+    h('span', { class: 'model-chips' }, ...channel.members.map((member) => modelChip(member, composer)))
   )
+  if (!modelLists) loadModels(render)
   list.setAttribute('aria-label', t('stage.log', { channel: channel.name }))
   renderMessages(channel)
   renderTyping(channel, typing)

@@ -11,7 +11,7 @@ import type { TurnResult } from './harness.ts'
 import { buildAgentPromptPasteBytes, getAgentPromptSubmitDelayMs } from './orca/agent-prompt-injection.ts'
 import { createProgramStatusOscScanner } from './orca/program-status/osc-scanner.ts'
 import { PROGRAM_STATUS_QUERY_REPLY, type ProgramStatusState } from './orca/program-status/protocol.ts'
-import type { Harness, Member } from './model.ts'
+import { modelArgs, type Harness, type Member } from './model.ts'
 import { BUFFER_LIMIT, createLineSplitter, PTY_HOST_VERSION, socketPath } from './pty-host.ts'
 import { findTranscript } from './sessions.ts'
 import { whiplashHome } from './store.ts'
@@ -85,7 +85,7 @@ type SessionMeta = { harness: Harness; cwd: string; startedAt: number; sessionId
 
 /** The interactive CLI for a member; a new Claude session gets its id up front so Stage can follow it. */
 export function interactiveCommand(
-  member: Pick<Member, 'harness' | 'sessionId' | 'writableRoots'>,
+  member: Pick<Member, 'harness' | 'sessionId' | 'writableRoots' | 'model' | 'effort'>,
   newSessionId: () => string = randomUUID
 ): { command: string; args: string[]; sessionId?: string } {
   const roots = member.writableRoots ?? []
@@ -95,6 +95,7 @@ export function interactiveCommand(
       command: 'claude',
       args: [
         ...roots.flatMap((root) => ['--add-dir', root]),
+        ...modelArgs(member),
         ...(member.sessionId ? ['--resume', sessionId] : ['--session-id', sessionId])
       ],
       sessionId
@@ -103,7 +104,7 @@ export function interactiveCommand(
   const config = roots.length ? ['-c', `sandbox_workspace_write.writable_roots=${JSON.stringify(roots)}`] : []
   return {
     command: 'codex',
-    args: [...config, ...(member.sessionId ? ['resume', member.sessionId] : [])],
+    args: [...config, ...modelArgs(member), ...(member.sessionId ? ['resume', member.sessionId] : [])],
     sessionId: member.sessionId
   }
 }

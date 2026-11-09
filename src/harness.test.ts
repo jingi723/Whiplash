@@ -23,6 +23,17 @@ describe('buildCommand', () => {
   })
 })
 
+describe('model choice', () => {
+  it('passes the chosen model and effort to each CLI, and nothing for the defaults', () => {
+    const claude = buildCommand({ harness: 'claude', model: 'claude-sonnet-5-5', effort: 'high' }, 'hi').args
+    assert.deepEqual(claude.slice(claude.indexOf('--model'), claude.indexOf('--model') + 4), ['--model', 'claude-sonnet-5-5', '--effort', 'high'])
+    assert.ok(!buildCommand({ harness: 'claude' }, 'hi').args.includes('--model'))
+    const codex = buildCommand({ harness: 'codex', sessionId: 's', model: 'gpt-6-sol', effort: 'max' }, 'hi').args
+    assert.ok(codex.includes('-m') && codex.includes('model_reasoning_effort="max"'))
+    assert.deepEqual(codex.slice(-2), ['s', 'hi'])
+  })
+})
+
 describe('writable roots', () => {
   it('extends each sandbox to the listed folders', () => {
     const claude = buildCommand({ harness: 'claude', sessionId: 's', writableRoots: ['/p'] }, 'hi').args

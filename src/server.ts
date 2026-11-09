@@ -28,6 +28,7 @@ import { agentEnv } from './env.ts'
 import { grantClaudeWorkspaceTrust, resolveLocalClaudeTrustConfig } from './orca/claude-folder-trust-file.ts'
 import { readOrcaTerminalAppearance } from './orca-appearance.ts'
 import { readUsage } from './usage.ts'
+import { listModels } from './models.ts'
 import { createTerminalHub } from './terminal.ts'
 import { readTranscriptTurn } from './transcript.ts'
 
@@ -122,6 +123,10 @@ const conductor = createConductor({
   sessionCommand(member, command, args, signal) {
     if (command === 'clear') {
       clearSession(member)
+      return Promise.resolve({ ok: true, text: '' })
+    }
+    if (command === 'model') {
+      terminals.close(member.id)
       return Promise.resolve({ ok: true, text: '' })
     }
     terminals.close(member.id)
@@ -372,6 +377,9 @@ async function handleApi(
     )
     const sessions = (await listSessions()).filter(({ id: sessionId }) => !taken.has(sessionId))
     return sendJson(response, 200, { sessions })
+  }
+  if (route === 'GET /api/models') {
+    return sendJson(response, 200, await listModels())
   }
   if (route === 'GET /api/accounts') {
     const [claude, codex] = await Promise.all([claudeAccount(), codexAccount()])

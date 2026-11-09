@@ -99,6 +99,10 @@ export const MESSAGES = {
     'notices.compactUnsupported': '[System] /compact works only for Claude Code members, not @{name}.',
     'composer.command.clear': 'Start a new conversation',
     'composer.command.compact': 'Compact the conversation',
+    'composer.command.model': 'Choose model and effort',
+    'composer.model.default': 'Default',
+    'notices.modelChanged': '[System] @{name} now uses model {model}, effort {effort}, from the next turn.',
+    'notices.modelUsage': '[System] Choose a model for @{name}: @{name} /model <model> [effort].',
     'notices.checkStopped': "[System] Stopped @{name}'s check.",
     'notices.chainBroken':
       '[System] Agents passed work back and forth {limit} times, so the chain was cut. The master has to step in.',
@@ -359,6 +363,10 @@ export const MESSAGES = {
     'notices.compactUnsupported': '[System] /compact는 Claude Code 멤버만 쓸 수 있습니다. @{name}는 해당되지 않습니다.',
     'composer.command.clear': '새 대화 시작',
     'composer.command.compact': '대화 압축',
+    'composer.command.model': '모델·effort 선택',
+    'composer.model.default': '기본값',
+    'notices.modelChanged': '[System] @{name} 다음 작업부터 모델 {model}, effort {effort}로 합니다.',
+    'notices.modelUsage': '[System] @{name} 모델을 고르세요: @{name} /model <모델> [effort]',
     'notices.checkStopped': '[System] @{name} 검사를 멈췄습니다.',
     'notices.chainBroken':
       '[System] 에이전트끼리 {limit}번 주고받아 체인을 끊었습니다. 주인이 다시 지시해야 이어갑니다.',

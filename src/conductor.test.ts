@@ -275,6 +275,26 @@ describe('conductor', () => {
     assert.ok(notices(state).includes('sessionCompacted'))
   })
 
+  it('sets and resets the model and effort with `@name /model`', async () => {
+    const state = room()
+    const channel = state.channels[0]
+    const coder = channel.members[0]
+    const { conductor, idle } = conduct(state, async () => ({ ok: true, text: '답' }))
+    let done = idle()
+    conductor.sendHumanMessage(channel, '@Coder /model claude-sonnet-5-5 high')
+    await done
+    assert.deepEqual([coder.model, coder.effort], ['claude-sonnet-5-5', 'high'])
+    assert.equal(notices(state).at(-1), 'modelChanged')
+    done = idle()
+    conductor.sendHumanMessage(channel, '@Coder /model default')
+    await done
+    assert.deepEqual([coder.model, coder.effort], [undefined, undefined])
+    done = idle()
+    conductor.sendHumanMessage(channel, '@Coder /model')
+    await done
+    assert.equal(notices(state).at(-1), 'modelUsage')
+  })
+
   it('reads `/clear` only right after @names, and answers /compact without a session', async () => {
     const state = room()
     const channel = state.channels[0]

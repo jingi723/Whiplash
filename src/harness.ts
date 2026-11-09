@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process'
 import { createInterface } from 'node:readline'
 import { memberEnv } from './env.ts'
-import type { Harness, Member } from './model.ts'
+import { modelArgs, type Harness, type Member } from './model.ts'
 
 export type StudioEvent =
   | { kind: 'text'; text: string }
@@ -36,7 +36,7 @@ function clip(text: string): string {
 
 /** Writes outside the agent's folder are refused by the OS sandbox of each CLI, even for imported sessions. */
 export function buildCommand(
-  member: Pick<Member, 'harness' | 'sessionId' | 'writableRoots'>,
+  member: Pick<Member, 'harness' | 'sessionId' | 'writableRoots' | 'model' | 'effort'>,
   prompt: string
 ): { command: string; args: string[] } {
   const roots = member.writableRoots ?? []
@@ -53,6 +53,7 @@ export function buildCommand(
         'acceptEdits',
         '--settings',
         CLAUDE_SANDBOX,
+        ...modelArgs(member),
         ...roots.flatMap((root) => ['--add-dir', root]),
         ...(member.sessionId ? ['--resume', member.sessionId] : [])
       ]
@@ -71,10 +72,11 @@ export function buildCommand(
           '-c',
           'sandbox_mode="workspace-write"',
           ...writableRoots,
+          ...modelArgs(member),
           member.sessionId,
           prompt
         ]
-      : ['exec', '--json', '-s', 'workspace-write', ...writableRoots, prompt]
+      : ['exec', '--json', '-s', 'workspace-write', ...writableRoots, ...modelArgs(member), prompt]
   }
 }
 

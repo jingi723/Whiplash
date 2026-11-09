@@ -193,6 +193,16 @@ export function createConductor(deps: ConductorDeps) {
     args: string,
     controller: AbortController
   ): Promise<void> {
+    if (command === 'model') {
+      // `default` hands the choice back to the CLI's own settings.
+      const [model, effort] = args.split(/\s+/).filter(Boolean).map((word) => (word === 'default' ? undefined : word))
+      if (!args || [model, effort].some((word) => word && !/^[\w.[\]-]+$/.test(word))) {
+        notify(channel, 'modelUsage', { name: member.name })
+        return
+      }
+      member.model = model
+      member.effort = effort
+    }
     if (command === 'compact') {
       if (!member.sessionId || member.harness !== 'claude') {
         notify(channel, member.sessionId ? 'compactUnsupported' : 'nothingToCompact', { name: member.name })
@@ -216,6 +226,10 @@ export function createConductor(deps: ConductorDeps) {
     if (command === 'compact') {
       const session = await deps.readSession(member)
       member.contextTokens = session?.contextTokens ?? member.contextTokens
+    }
+    if (command === 'model') {
+      notify(channel, 'modelChanged', { name: member.name, model: member.model ?? 'default', effort: member.effort ?? 'default' })
+      return
     }
     notify(channel, command === 'clear' ? 'sessionCleared' : 'sessionCompacted', { name: member.name })
   }

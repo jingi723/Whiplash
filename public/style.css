@@ -465,6 +465,38 @@ button.who:hover {
   color: var(--brand);
 }
 
+.model-chips {
+  display: flex;
+  flex: none;
+  gap: 6px;
+  max-width: 60%;
+  margin-left: auto;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.model-chip {
+  flex: none;
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: none;
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.model-chip:hover {
+  border-color: var(--brand);
+  color: var(--brand);
+}
+
+.model-chip-name {
+  margin-right: 5px;
+  color: var(--text);
+  font-weight: 600;
+}
+
 .suggestion-hint {
   margin-left: 12px;
   color: var(--muted);
