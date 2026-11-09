@@ -12,7 +12,8 @@ it('drops parent session markers but keeps user settings', () => {
       CLAUDE_CODE_BRIDGE_SESSION_ID: 'bridge',
       CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1',
       ORCA_PANE_KEY: 'pane',
-      ORCA_AGENT_HOOK_TOKEN: 'secret'
+      ORCA_AGENT_HOOK_TOKEN: 'secret',
+      ELECTRON_RUN_AS_NODE: '1'
     }),
     { PATH: '/bin', CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1' }
   )

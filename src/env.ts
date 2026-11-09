@@ -16,7 +16,10 @@ const SESSION_MARKERS = new Set([
   'CLAUDE_CODE_SESSION_ID',
   'CLAUDE_CODE_SSE_PORT',
   'CLAUDE_EFFORT',
-  'CLAUDE_PID'
+  'CLAUDE_PID',
+  // The desktop app runs the server on Electron as Node; inherited, it makes every Electron app an agent
+  // launches (the Whiplash app itself included) start as bare Node and exit.
+  'ELECTRON_RUN_AS_NODE'
 ])
 
 /** The environment an agent starts with when Whiplash itself was launched from inside Claude Code or Orca. */
