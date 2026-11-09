@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url'
 import { createConductor, runShellCheck } from './conductor.ts'
 import { createWorktree, fileDiff, gitInfo, listFiles, readLog, readProjectFile, resolveInside, searchProject, showCommit } from './git.ts'
 import { claudeAccount, codexAccount } from './accounts.ts'
-import { runTurn, type StudioEvent } from './harness.ts'
+import { probeCommands, runTurn, type StudioEvent } from './harness.ts'
 import {
   english,
   ATTACHMENT_TOKEN,
@@ -28,7 +28,7 @@ import { agentEnv } from './env.ts'
 import { grantClaudeWorkspaceTrust, resolveLocalClaudeTrustConfig } from './orca/claude-folder-trust-file.ts'
 import { readOrcaTerminalAppearance } from './orca-appearance.ts'
 import { readUsage } from './usage.ts'
-import { listModels } from './models.ts'
+import { codexPrompts, expandCodexPrompt, listModels } from './models.ts'
 import { createTerminalHub } from './terminal.ts'
 import { readTranscriptTurn } from './transcript.ts'
 
@@ -120,18 +120,21 @@ const conductor = createConductor({
   canInject: (member) => terminals.statusOf(member.id)?.state === 'working',
   inject: (member, prompt) => terminals.inject(member.id, prompt),
   // An open TUI keeps the old conversation in memory, so it closes first; reopening resumes the new state.
-  sessionCommand(member, command, args, signal) {
+  async sessionCommand(member, command, args, onEvent, signal) {
     if (command === 'clear') {
       clearSession(member)
-      return Promise.resolve({ ok: true, text: '' })
+      return { ok: true, text: '' }
+    }
+    if (command === 'model' || command === 'compact') {
+      terminals.close(member.id)
     }
     if (command === 'model') {
-      terminals.close(member.id)
-      return Promise.resolve({ ok: true, text: '' })
+      return { ok: true, text: '' }
     }
-    terminals.close(member.id)
-    return runTurn(member, `/compact ${args}`.trim(), () => {}, signal)
+    const prompt = member.harness === 'codex' ? await expandCodexPrompt(command, args) : `/${command} ${args}`.trim()
+    return runTurn(member, prompt, onEvent, signal)
   },
+  commandsOf,
   runCheck: runShellCheck,
   async readSession(member) {
     const path = member.sessionId ? await findTranscript(member.harness, member.sessionId) : null
@@ -152,9 +155,16 @@ const conductor = createConductor({
   }
 })
 
+/** A Claude member that has not started since this was added borrows another's list; most commands are global. */
+function commandsOf(member: Member): string[] {
+  if (member.harness === 'codex') return codexPrompts()
+  return member.slashCommands ?? everyone.members.find(({ slashCommands }) => slashCommands)?.slashCommands ?? []
+}
+
 function snapshot(): unknown {
   return {
     channels: state.channels,
+    commands: Object.fromEntries(everyone.members.map((member) => [member.id, commandsOf(member)])),
     activity: conductor.activityOf(),
     queued: conductor.queuedOf(),
     terminals: terminals.openIds(),
@@ -695,6 +705,15 @@ const server = createServer((request, response) => {
 // Agents left running by the previous server come back before anyone can ask for them.
 await terminals.ready
 writeBrowserWrapper()
+// Members from before command lists were kept learn theirs now, so `/` offers everything before their next turn.
+for (const member of everyone.members.filter(({ harness, slashCommands }) => harness === 'claude' && !slashCommands)) {
+  void probeCommands(member).then((found) => {
+    if (found.length) {
+      member.slashCommands = found
+      publishState()
+    }
+  })
+}
 server.listen(PORT, HOST, () => {
   console.log(`Whiplash: http://${HOST}:${PORT}`)
 })

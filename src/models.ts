@@ -1,3 +1,4 @@
+import { readdirSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
@@ -45,4 +46,26 @@ async function codexModels(home: string): Promise<ModelList> {
 export async function listModels(home = homedir()): Promise<{ claude: ModelList; codex: ModelList }> {
   const [claude, codex] = await Promise.all([claudeModels(home), codexModels(home)])
   return { claude, codex }
+}
+
+const codexPromptDir = (home: string) => join(home, '.codex', 'prompts')
+
+/** Codex lists no commands, but its custom ones are files the master wrote, run as `/prompts:<file name>`. */
+export function codexPrompts(home = homedir()): string[] {
+  try {
+    return readdirSync(codexPromptDir(home))
+      .filter((file) => file.endsWith('.md'))
+      .map((file) => `prompts:${file.slice(0, -3)}`)
+  } catch {
+    return []
+  }
+}
+
+/** `codex exec` takes no slash commands, so a custom one is sent as the prompt its file holds, as the TUI would. */
+export async function expandCodexPrompt(command: string, args: string, home = homedir()): Promise<string> {
+  const name = command.replace(/^prompts:/, '')
+  if (!codexPrompts(home).includes(command)) return `/${command} ${args}`.trim()
+  const body = (await readText(join(codexPromptDir(home), `${name}.md`))).replace(/^---\n[\s\S]*?\n---\n/, '')
+  // ponytail: only $ARGUMENTS is filled; add $1..$9 and KEY=value when a prompt uses them.
+  return body.replaceAll('$ARGUMENTS', args).trim()
 }

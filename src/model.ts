@@ -42,6 +42,8 @@ export type Member = {
   /** Unset means the CLI's own default from its settings. */
   model?: string
   effort?: string
+  /** Slash commands Claude Code offered at this member's last start, skills included. */
+  slashCommands?: string[]
 }
 
 export type Author =
@@ -174,7 +176,10 @@ export function planHandoffs(
   return { names: chainBroken ? [] : names, chainBroken }
 }
 
-export type SessionCommand = { names: string[]; command: 'clear' | 'compact' | 'model'; args: string }
+/** Whiplash runs these itself because they change the session or settings it keeps; the CLI runs every other command. */
+export const SESSION_COMMANDS = ['clear', 'compact', 'model']
+
+export type SessionCommand = { names: string[]; command: string; args: string }
 
 /** CLI flags for a member's chosen model and effort. */
 export function modelArgs({ harness, model, effort }: Pick<Member, 'harness' | 'model' | 'effort'>): string[] {
@@ -184,14 +189,21 @@ export function modelArgs({ harness, model, effort }: Pick<Member, 'harness' | '
   return [...(model ? ['-m', model] : []), ...(effort ? ['-c', `model_reasoning_effort="${effort}"`] : [])]
 }
 
-/** `@Name /clear`, `/compact [focus]` or `/model <model> [effort]`: run on the named members' sessions. */
-export function parseSessionCommand(text: string, names: readonly string[]): SessionCommand | null {
+/**
+ * `@Name /command args` runs a slash command on the named members' sessions. Only a command every named member
+ * knows counts, so a pasted path like `@Name /Users/me` stays an ordinary message.
+ */
+export function parseSessionCommand(
+  text: string,
+  names: readonly string[],
+  knows: (name: string, command: string) => boolean = (_, command) => SESSION_COMMANDS.includes(command)
+): SessionCommand | null {
+  const match = /^((?:@[\p{L}\p{N}_-]+\s+)+)\/([\w:.-]+)(?=\s|$)\s*([\s\S]*)$/u.exec(text.trim())
   // Words after /clear would be lost with the old conversation, so that is read as an ordinary message.
-  const match = /^((?:@[\p{L}\p{N}_-]+\s+)+)\/(clear|compact(?=\s|$)|model(?=\s|$))\s*([\s\S]*)$/u.exec(text.trim())
-  if (match?.[2] === 'clear' && match[3]) return null
-  const found = match ? findMentions(match[1], names) : []
-  return match && found.length
-    ? { names: found, command: match[2] as SessionCommand['command'], args: (match[3] ?? '').trim() }
+  if (!match || (match[2] === 'clear' && match[3])) return null
+  const found = findMentions(match[1], names)
+  return found.length && found.every((name) => knows(name, match[2]))
+    ? { names: found, command: match[2], args: match[3].trim() }
     : null
 }
 

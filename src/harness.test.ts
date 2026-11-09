@@ -51,6 +51,10 @@ describe('parseStreamLine', () => {
       's'
     )
     assert.deepEqual(
+      parseStreamLine('claude', line({ type: 'system', subtype: 'init', session_id: 's', slash_commands: ['cost', 'ponytail:ponytail'] })).slashCommands,
+      ['cost', 'ponytail:ponytail']
+    )
+    assert.deepEqual(
       parseStreamLine(
         'claude',
         line({

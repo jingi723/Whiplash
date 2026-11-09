@@ -444,6 +444,8 @@ button.who:hover {
   margin: 0 0 -4px;
   padding: 4px;
   min-width: 200px;
+  max-height: 50vh;
+  overflow-y: auto;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--raised);

@@ -13,6 +13,7 @@ export type TurnResult = {
   ok: boolean
   text: string
   sessionId?: string
+  slashCommands?: string[]
   error?: string
   /** The open terminal never took the prompt, usually because a dialog is waiting for the user. */
   blocked?: boolean
@@ -21,6 +22,7 @@ export type TurnResult = {
 type Parsed = {
   events: StudioEvent[]
   sessionId?: string
+  slashCommands?: string[]
   reply?: string
   failure?: string
 }
@@ -97,7 +99,7 @@ function toolResultText(content: unknown): string {
 
 function parseClaude(row: any): Parsed {
   if (row.type === 'system' && row.subtype === 'init') {
-    return { events: [{ kind: 'status', text: 'connected' }], sessionId: row.session_id }
+    return { events: [{ kind: 'status', text: 'connected' }], sessionId: row.session_id, slashCommands: row.slash_commands }
   }
   if (row.type === 'assistant') {
     return {
@@ -198,6 +200,7 @@ export function runTurn(
       const parsed = parseStreamLine(member.harness, line)
       parsed.events.forEach(onEvent)
       result.sessionId = parsed.sessionId ?? result.sessionId
+      result.slashCommands = parsed.slashCommands ?? result.slashCommands
       result.text = parsed.reply ?? result.text
       failure = parsed.failure ?? failure
     })
@@ -208,5 +211,26 @@ export function runTurn(
       const ok = code === 0 && !failure
       resolve({ ...result, ok, ...(ok ? {} : { error: failure || stderr.trim() || `exit ${code}` }) })
     })
+  })
+}
+
+/** Claude Code lists its slash commands, skills included, as it starts; the probe stops there, before any request. */
+export function probeCommands(member: Pick<Member, 'id' | 'cwd'>): Promise<string[]> {
+  return new Promise((resolve) => {
+    const child = spawn('claude', ['-p', '/cost', '--output-format', 'stream-json', '--verbose', '--no-session-persistence'], {
+      cwd: member.cwd,
+      env: memberEnv(member.id),
+      stdio: ['ignore', 'pipe', 'ignore']
+    })
+    let found: string[] = []
+    createInterface({ input: child.stdout }).on('line', (line) => {
+      const { slashCommands } = parseStreamLine('claude', line)
+      if (slashCommands) {
+        found = slashCommands
+        child.kill()
+      }
+    })
+    child.on('error', () => resolve([]))
+    child.on('close', () => resolve(found))
   })
 }

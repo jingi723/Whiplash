@@ -102,6 +102,7 @@ export const MESSAGES = {
     'composer.command.model': 'Choose model and effort',
     'composer.model.default': 'Default',
     'notices.modelChanged': '[System] @{name} now uses model {model}, effort {effort}, from the next turn.',
+    'notices.commandTyped': '[System] Typed {command} into @{name}\'s terminal; see the result there.',
     'notices.modelUsage': '[System] Choose a model for @{name}: @{name} /model <model> [effort].',
     'notices.checkStopped': "[System] Stopped @{name}'s check.",
     'notices.chainBroken':
@@ -366,6 +367,7 @@ export const MESSAGES = {
     'composer.command.model': '모델·effort 선택',
     'composer.model.default': '기본값',
     'notices.modelChanged': '[System] @{name} 다음 작업부터 모델 {model}, effort {effort}로 합니다.',
+    'notices.commandTyped': '[System] @{name}의 터미널에 {command}를 입력했습니다. 결과는 터미널 탭에서 보세요.',
     'notices.modelUsage': '[System] @{name} 모델을 고르세요: @{name} /model <모델> [effort]',
     'notices.checkStopped': '[System] @{name} 검사를 멈췄습니다.',
     'notices.chainBroken':

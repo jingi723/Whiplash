@@ -16,8 +16,8 @@ const DEFAULT_WINDOW = 200_000
 const LARGE_WINDOW = 1_000_000
 const LIVE_SESSION_MS = 120_000
 const MENTION_QUERY = /(?:^|\s)@([\p{L}\p{N}_-]*)$/u
-// `@name /clear` runs Claude Code's command on that member; the reply chip stands in for the @name.
-const COMMAND_QUERY = /^((?:@[\p{L}\p{N}_-]+\s+)*)\/([a-z]*)$/u
+// `@name /cost` runs the member's CLI command; the reply chip stands in for the @name.
+const COMMAND_QUERY = /^((?:@[\p{L}\p{N}_-]+\s+)*)\/([\w:.-]*)$/u
 // `/model` then asks for a model and an effort, as the terminal's picker does.
 const MODEL_QUERY = /^((?:@[\p{L}\p{N}_-]+\s+)*)\/model\s+(?:(\S+)\s+)?(\S*)$/u
 const SESSION_COMMANDS = ['clear', 'compact', 'model']
@@ -42,6 +42,7 @@ const ui = {
   queued: [],
   terminals: [],
   terminalStatus: {},
+  commands: {},
   replyTo: {},
   replyMessage: {},
   channelId: null,
@@ -652,7 +653,10 @@ function createComposer(channelId) {
     }
     const command = COMMAND_QUERY.exec(before)
     if (command && addressed(command[1])) {
-      return { typed: command[2], items: SESSION_COMMANDS.map((name) => ({ insert: name, label: `/${name}`, hint: t(`composer.command.${name}`) })) }
+      // Whiplash's own commands lead; the rest is whatever the member's CLI offers today.
+      const offered = ui.commands[targetOf(command[1])?.id] ?? []
+      const names = [...new Set([...SESSION_COMMANDS, ...offered])]
+      return { typed: command[2], items: names.map((name) => ({ insert: name, label: `/${name}`, hint: SESSION_COMMANDS.includes(name) ? t(`composer.command.${name}`) : '' })) }
     }
     const mention = MENTION_QUERY.exec(before)
     if (!mention) return undefined
@@ -710,6 +714,7 @@ function createComposer(channelId) {
         )
       )
     )
+    if (!list.hidden) list.children[active]?.scrollIntoView({ block: 'nearest' })
   }
   const chip = h('span', { class: 'chip', hidden: true })
   const box = h('div', { class: 'composer-box', 'data-drop-hint': t('composer.drop') }, chip, input)
@@ -2629,6 +2634,7 @@ events.addEventListener('state', (event) => {
   ui.queued = next.queued ?? []
   ui.terminals = next.terminals ?? []
   ui.terminalStatus = next.terminalStatus ?? {}
+  ui.commands = next.commands ?? {}
   notifyChanges()
   render()
   updateBadge()

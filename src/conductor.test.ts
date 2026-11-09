@@ -319,6 +319,56 @@ describe('conductor', () => {
     await done
     assert.equal(prompts.length, 2)
   })
+
+  it('runs the CLI commands a member offers, and leaves paths and unknown words as messages', async () => {
+    const state = room()
+    const channel = state.channels[0]
+    const prompts: string[] = []
+    const ran: string[] = []
+    let attached = false
+    const typed: string[] = []
+    const { conductor, idle } = conduct(
+      state,
+      async (_member, prompt) => {
+        prompts.push(prompt)
+        return { ok: true, text: '답' }
+      },
+      {
+        commandsOf: () => ['cost', 'code-review'],
+        isAttached: () => attached,
+        inject: async (_member, prompt) => {
+          typed.push(prompt)
+        },
+        sessionCommand: async (_member, command, args) => {
+          ran.push(`${command}:${args}`)
+          return { ok: true, text: '@Reviewer 비용 $1', sessionId: 's1' }
+        }
+      }
+    )
+    let done = idle()
+    conductor.sendHumanMessage(channel, '@Coder /cost')
+    await done
+    assert.deepEqual(ran, ['cost:'])
+    const reply = channel.messages.at(-1)
+    assert.deepEqual([reply?.author.kind, reply?.text, reply?.command], ['agent', '@Reviewer 비용 $1', true])
+    assert.equal(channel.members[0].sessionId, 's1')
+    // The command's output hands nothing off.
+    assert.equal(prompts.length, 0)
+    done = idle()
+    conductor.sendHumanMessage(channel, '@Coder /Users/me/project 봐줘')
+    await done
+    done = idle()
+    conductor.sendHumanMessage(channel, '@Coder /nope')
+    await done
+    assert.equal(prompts.length, 2)
+    attached = true
+    done = idle()
+    conductor.sendHumanMessage(channel, '@Coder /code-review 보안 위주')
+    await done
+    assert.deepEqual(typed, ['/code-review 보안 위주'])
+    assert.equal(notices(state).at(-1), 'commandTyped')
+    assert.equal(ran.length, 1)
+  })
 })
 
 describe('conductor language', () => {

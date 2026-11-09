@@ -14,6 +14,7 @@ import {
   parseTempoCommand,
   planHandoffs,
   projectFolder,
+  SESSION_COMMANDS,
   tempoMessage,
   type Attachment,
   type Author,
@@ -46,13 +47,16 @@ export type ConductorDeps = {
   canInject?: (member: Member) => boolean
   /** Types words into the member's running terminal turn; that turn's reply then answers them too. */
   inject?: (member: Member, prompt: string) => Promise<void>
-  /** Runs `/clear` or `/compact` on the member's session; the member is idle while it runs. */
+  /** Runs a slash command on the member's session; the member is idle while it runs. */
   sessionCommand: (
     member: Member,
     command: SessionCommand['command'],
     args: string,
+    onEvent: (event: StudioEvent) => void,
     signal: AbortSignal
   ) => Promise<TurnResult>
+  /** Slash commands the member's CLI offers beyond the ones Whiplash runs itself. */
+  commandsOf?: (member: Member) => string[]
   onChange: () => void
   onStudioEvent: (memberId: string, event: StudioEvent) => void
 }
@@ -203,6 +207,17 @@ export function createConductor(deps: ConductorDeps) {
       member.model = model
       member.effort = effort
     }
+    const own = SESSION_COMMANDS.includes(command)
+    // The TUI runs every command itself, menus included, so an open terminal gets the command as typed.
+    if (!own && deps.isAttached?.(member) && deps.inject) {
+      await deps.inject(member, `/${command} ${args}`.trim())
+      notify(channel, 'commandTyped', { name: member.name, command: `/${command}` })
+      return
+    }
+    if (!own && (await isUsedElsewhere(member))) {
+      notify(channel, 'busyElsewhere', { name: member.name })
+      return
+    }
     if (command === 'compact') {
       if (!member.sessionId || member.harness !== 'claude') {
         notify(channel, member.sessionId ? 'compactUnsupported' : 'nothingToCompact', { name: member.name })
@@ -213,8 +228,15 @@ export function createConductor(deps: ConductorDeps) {
         return
       }
     }
-    const result = await deps.sessionCommand(member, command, args, controller.signal)
+    const result = await deps.sessionCommand(
+      member,
+      command,
+      args,
+      (event) => deps.onStudioEvent(member.id, event),
+      controller.signal
+    )
     member.lastTurnEndedAt = Date.now()
+    member.slashCommands = result.slashCommands ?? member.slashCommands
     if (controller.signal.aborted) {
       notify(channel, 'turnStopped', { name: member.name })
       return
@@ -223,10 +245,16 @@ export function createConductor(deps: ConductorDeps) {
       notify(channel, 'turnFailed', { name: member.name, error: result.error ?? 'Command failed' }, member.id)
       return
     }
-    if (command === 'compact') {
+    if (!own) {
+      // A skill can start the member's first session; its answer is the command's output, not a handoff.
+      member.sessionId = result.sessionId ?? member.sessionId
+      if (result.text) append(channel, { kind: 'agent', memberId: member.id, name: member.name }, result.text, { command: true })
+    }
+    if (command !== 'clear' && command !== 'model') {
       const session = await deps.readSession(member)
       member.contextTokens = session?.contextTokens ?? member.contextTokens
     }
+    if (!own) return
     if (command === 'model') {
       notify(channel, 'modelChanged', { name: member.name, model: member.model ?? 'default', effort: member.effort ?? 'default' })
       return
@@ -266,6 +294,7 @@ export function createConductor(deps: ConductorDeps) {
       controller.signal
     )
     member.sessionId = result.sessionId ?? member.sessionId
+    member.slashCommands = result.slashCommands ?? member.slashCommands
     member.lastTurnEndedAt = Date.now()
     if (controller.signal.aborted) {
       notify(channel, 'turnStopped', { name: member.name })
@@ -330,7 +359,14 @@ export function createConductor(deps: ConductorDeps) {
   }
 
   function sendHumanMessage(channel: Channel, text: string, locale: Locale = 'en', attachments: Attachment[] = []): void {
-    const command = parseSessionCommand(text, channel.members.map(({ name }) => name))
+    const command = parseSessionCommand(
+      text,
+      channel.members.map(({ name }) => name),
+      (name, typed) => {
+        const member = channel.members.find((candidate) => candidate.name === name)
+        return SESSION_COMMANDS.includes(typed) || Boolean(member && deps.commandsOf?.(member).includes(typed))
+      }
+    )
     if (command) {
       append(channel, { kind: 'human' }, text.trim(), { command: true })
       for (const name of command.names) {
