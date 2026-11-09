@@ -1,3 +1,5 @@
 node_modules
 .DS_Store
 dist.noindex/
+.claude/settings.local.json
+.claude/.cc-writes/
