@@ -6,6 +6,7 @@ import { formatResetDuration } from './orca/rate-limit-reset-format.js'
 import { formatRateLimitWindowChipLabel, formatWindowLabel } from './orca/rate-limit-window-label.js'
 import { barColor, clampUsedPercent } from './orca/usage-bar.js'
 import { icon, providerIcon } from './icons.js'
+import { mountBrowser } from './browser-view.js'
 
 // In the desktop app the macOS window controls float over the rail, as in Orca.
 if (window.whiplashDesktop?.platform === 'darwin') document.documentElement.classList.add('desktop-mac')
@@ -1532,48 +1533,18 @@ function renderTabs(channel, active) {
   )
 }
 
-// --- Browser: a live, view-only screencast of the agent's own Chrome, streamed while its tab is shown.
+// --- Browser: the agent's Chrome, live, while its tab is shown (public/browser-view.js).
 let browserView = null
 
 function disposeBrowser() {
-  browserView?.source.close()
+  browserView?.dispose()
   browserView = null
 }
 
 function renderBrowser(tab) {
   if (browserView?.key !== tab.key) {
     disposeBrowser()
-    const title = h('strong', {}, t('studio.loading'))
-    const url = h('span', { class: 'path' })
-    const note = h('p', { class: 'hint browser-note' }, t('browser.starting'))
-    const frame = h('img', { class: 'browser-frame', alt: '', hidden: true })
-    const node = h('section', { class: 'studio-page' }, h('div', { class: 'page-toolbar' }, icon('globe'), title, url), h('div', { class: 'browser-view' }, note, frame))
-    const source = new EventSource(`/api/members/${tab.memberId}/browser/stream`)
-    const show = (text) => {
-      note.textContent = text
-      note.hidden = false
-      frame.hidden = true
-    }
-    source.addEventListener('page', (event) => {
-      const page = JSON.parse(event.data)
-      title.textContent = page.title || page.url
-      url.textContent = page.url
-      url.title = page.url
-    })
-    source.addEventListener('frame', (event) => {
-      frame.src = `data:image/jpeg;base64,${JSON.parse(event.data).data}`
-      frame.hidden = false
-      note.hidden = true
-    })
-    source.addEventListener('closed', () => {
-      source.close()
-      show(t('browser.closed'))
-    })
-    // A failed stream carries no body; asking again turns the reason (say, no Chrome) into words.
-    source.onerror = () => {
-      if (source.readyState === EventSource.CLOSED) void api(`members/${tab.memberId}/browser/ensure`, {}).then(() => show(t('browser.closed')), (error) => show(error.message))
-    }
-    browserView = { key: tab.key, node, source }
+    browserView = { key: tab.key, ...mountBrowser(tab.memberId, { h, t, api }) }
   }
   if (main.firstChild !== browserView.node) main.replaceChildren(browserView.node)
 }

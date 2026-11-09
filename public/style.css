@@ -2745,3 +2745,58 @@ kbd {
   padding: 16px;
   text-align: center;
 }
+
+.browser-view {
+  position: relative;
+}
+
+.browser-view.controlling .browser-frame {
+  outline: 2px solid var(--working);
+  cursor: default;
+}
+
+.browser-address {
+  flex: 1;
+  min-width: 0;
+  padding: 3px 8px;
+  font: 12px var(--mono);
+}
+
+.browser-tabs {
+  max-width: 200px;
+  font-size: 12px;
+}
+
+.browser-badge {
+  flex: none;
+  color: var(--working);
+  font-weight: 600;
+}
+
+.page-toolbar .ghost[aria-pressed='true'] {
+  background: var(--brand-soft-strong);
+  color: var(--text);
+}
+
+/* Off to the side but focusable: the IME needs a real text box. */
+.browser-keys {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+  resize: none;
+}
+
+.browser-ime {
+  position: absolute;
+  bottom: 12px;
+  left: 50%;
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: var(--raised);
+  transform: translateX(-50%);
+}

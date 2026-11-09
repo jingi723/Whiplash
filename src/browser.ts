@@ -129,50 +129,61 @@ exec ${JSON.stringify(real)} --cdp "$port" --session "whiplash-$WHIPLASH_MEMBER_
 }
 
 type Target = { targetId: string; type: string; url: string; title: string }
+export type FrameMetadata = { deviceWidth: number; deviceHeight: number; offsetTop: number; pageScaleFactor: number }
 export type BrowserEvent =
-  | { type: 'frame'; data: string; width: number; height: number }
-  | { type: 'page'; url: string; title: string }
+  | { type: 'frame'; data: string; metadata: FrameMetadata }
+  | { type: 'pages'; current: string; pages: { id: string; url: string; title: string }[] }
   | { type: 'closed' }
 
+/** A live view of the member's Chrome, and the controls that act on the page it shows. */
+export type BrowserWatch = {
+  stop(): void
+  /** A CDP command on the shown page; undefined while no page is attached. */
+  call(method: string, params?: object): Promise<unknown>
+  /** Shows that tab, and brings it to the front for the agent too. */
+  select(targetId: string): void
+}
+
 /**
- * Streams the member's newest page as JPEG frames, following it across new tabs and navigations.
- * One browser-level CDP socket: target events tell the page and its title, a flat session carries the screencast.
+ * Streams the member's page as JPEG frames: the newest tab, or the one picked, across navigations.
+ * One browser-level CDP socket: target events list the pages, a flat session carries the screencast and input.
  */
-export async function watchBrowser(memberId: string, emit: (event: BrowserEvent) => void): Promise<() => void> {
+export async function watchBrowser(memberId: string, emit: (event: BrowserEvent) => void): Promise<BrowserWatch> {
   const port = await ensureBrowser(memberId)
   const version = await versionOf(port)
   if (!version) throw new Error('Chrome is not running')
   const socket = new WebSocket(version.webSocketDebuggerUrl)
   const pages = new Map<string, Target>()
+  const replies = new Map<number, (message: { result?: unknown; error?: unknown }) => void>()
   let nextId = 1
   let watched = ''
   let session = ''
-  const send = (method: string, params: object = {}, sessionId?: string): number => {
+  const send = (method: string, params: object = {}, sessionId?: string): Promise<{ result?: any; error?: unknown }> => {
     const id = nextId++
     socket.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }))
-    return id
+    return new Promise((resolve) => replies.set(id, resolve))
   }
-  const attachIds = new Map<number, string>()
-  // ponytail: the newest page is the one shown; a tab picker can come with phase 2's controls.
+  const listPages = (): void =>
+    emit({ type: 'pages', current: watched, pages: [...pages.values()].map(({ targetId, url, title }) => ({ id: targetId, url, title })) })
   const follow = (targetId: string): void => {
-    if (targetId === watched) return
-    if (session) send('Target.detachFromTarget', { sessionId: session })
+    if (targetId === watched || !pages.has(targetId)) return
+    if (session) void send('Target.detachFromTarget', { sessionId: session })
     watched = targetId
     session = ''
-    attachIds.set(send('Target.attachToTarget', { targetId, flatten: true }), targetId)
-    const page = pages.get(targetId)
-    if (page) emit({ type: 'page', url: page.url, title: page.title })
+    listPages()
+    void send('Target.attachToTarget', { targetId, flatten: true }).then(({ result }) => {
+      if (targetId !== watched || !result) return
+      session = result.sessionId
+      void send('Page.enable', {}, session)
+      void send('Page.startScreencast', { format: 'jpeg', quality: 70, maxWidth: 1600, maxHeight: 1200 }, session)
+    })
   }
-  socket.onopen = () => send('Target.setDiscoverTargets', { discover: true })
+  socket.onopen = () => void send('Target.setDiscoverTargets', { discover: true })
   socket.onmessage = (event) => {
     const message = JSON.parse(String(event.data))
-    if (attachIds.has(message.id)) {
-      const targetId = attachIds.get(message.id)!
-      attachIds.delete(message.id)
-      if (targetId !== watched || !message.result) return
-      session = message.result.sessionId
-      send('Page.enable', {}, session)
-      send('Page.startScreencast', { format: 'jpeg', quality: 70, maxWidth: 1600, maxHeight: 1200 }, session)
+    if (replies.has(message.id)) {
+      replies.get(message.id)!(message)
+      replies.delete(message.id)
       return
     }
     const { method, params } = message
@@ -181,22 +192,41 @@ export async function watchBrowser(memberId: string, emit: (event: BrowserEvent)
       if (info.type !== 'page') return
       const known = pages.has(info.targetId)
       pages.set(info.targetId, info)
+      // A tab the agent just opened is the one it works in.
       if (!known) follow(info.targetId)
-      else if (info.targetId === watched) emit({ type: 'page', url: info.url, title: info.title })
-    } else if (method === 'Target.targetDestroyed') {
-      pages.delete(params.targetId)
+      else listPages()
+    } else if (method === 'Target.targetDestroyed' && pages.delete(params.targetId)) {
       if (params.targetId === watched) {
         watched = ''
         session = ''
         const last = [...pages.keys()].at(-1)
         if (last) follow(last)
       }
+      listPages()
     } else if (method === 'Page.screencastFrame' && message.sessionId === session) {
-      send('Page.screencastFrameAck', { sessionId: params.sessionId }, session)
-      emit({ type: 'frame', data: params.data, width: params.metadata.deviceWidth, height: params.metadata.deviceHeight })
+      void send('Page.screencastFrameAck', { sessionId: params.sessionId }, session)
+      const { deviceWidth, deviceHeight, offsetTop, pageScaleFactor } = params.metadata
+      emit({ type: 'frame', data: params.data, metadata: { deviceWidth, deviceHeight, offsetTop, pageScaleFactor } })
     }
   }
   socket.onerror = () => {}
-  socket.onclose = () => emit({ type: 'closed' })
-  return () => socket.close()
+  socket.onclose = () => {
+    for (const reply of replies.values()) reply({ error: 'closed' })
+    emit({ type: 'closed' })
+  }
+  return {
+    stop: () => socket.close(),
+    call: async (method, params = {}) => (session ? (await send(method, params, session)).result : undefined),
+    select(targetId) {
+      follow(targetId)
+      if (pages.has(targetId)) void send('Target.activateTarget', { targetId })
+    }
+  }
+}
+
+/** Back (-1) or forward (+1) through the shown page's history. */
+export async function goHistory(watch: BrowserWatch, delta: number): Promise<void> {
+  const history = (await watch.call('Page.getNavigationHistory')) as { currentIndex: number; entries: { id: number }[] } | undefined
+  const entry = history?.entries[history.currentIndex + delta]
+  if (entry) await watch.call('Page.navigateToHistoryEntry', { entryId: entry.id })
 }

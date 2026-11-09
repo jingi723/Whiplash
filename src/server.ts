@@ -23,7 +23,7 @@ import {
 } from './model.ts'
 import { findTranscript, listSessions } from './sessions.ts'
 import { createSaver, loadState, serverPort, whiplashHome } from './store.ts'
-import { ChromeNotFound, closeBrowser, ensureBrowser, watchBrowser, writeBrowserWrapper } from './browser.ts'
+import { type BrowserWatch, ChromeNotFound, closeBrowser, ensureBrowser, goHistory, watchBrowser, writeBrowserWrapper } from './browser.ts'
 import { agentEnv } from './env.ts'
 import { grantClaudeWorkspaceTrust, resolveLocalClaudeTrustConfig } from './orca/claude-folder-trust-file.ts'
 import { readOrcaTerminalAppearance } from './orca-appearance.ts'
@@ -393,6 +393,10 @@ async function handleApi(
       await closeBrowser(id)
       return sendJson(response, 200, {})
     }
+    if (parts[4] === 'input') {
+      await browserInput(id, body)
+      return sendJson(response, 200, {})
+    }
     throw new HttpError(404, 'notFound')
   }
   if (route === 'POST /api/terminal-colors') {
@@ -577,18 +581,43 @@ function browserError(error: Error): never {
   throw error instanceof ChromeNotFound ? new HttpError(503, 'chromeNotFound') : new HttpError(500, 'browserFailed', { detail: error.message })
 }
 
-/** The member's Chrome as SSE: `page` (URL and title) and `frame` (a JPEG), ending with `closed`. */
+/** Open browser views by the id their stream was given, so input reaches the page that viewer sees. */
+const viewers = new Map<string, { memberId: string; watch: BrowserWatch }>()
+/** What the owner's hands may send a page; nothing that reads it back or runs script. */
+const BROWSER_INPUT = new Set(['Input.dispatchMouseEvent', 'Input.dispatchKeyEvent', 'Input.insertText', 'Page.navigate', 'Page.reload'])
+
+/** The member's Chrome as SSE: `viewer` (this view's id), `pages`, `frame` (a JPEG), ending with `closed`. */
 async function openBrowserStream(request: IncomingMessage, response: ServerResponse, memberId: string): Promise<void> {
   // The CDP socket opens on a later tick, so the head is written before any event arrives.
-  const stop = await watchBrowser(memberId, (event) => {
+  const watch = await watchBrowser(memberId, (event) => {
     if (response.writableEnded || response.destroyed) return
     response.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)
     if (event.type === 'closed') response.end()
   }).catch(browserError)
   // Chrome can take seconds to start; a viewer who left meanwhile must not leave the CDP socket behind.
-  if (request.socket.destroyed) return stop()
+  if (request.socket.destroyed) return watch.stop()
+  const viewer = randomUUID()
+  viewers.set(viewer, { memberId, watch })
   response.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store' })
-  response.on('close', stop)
+  response.write(`event: viewer\ndata: ${JSON.stringify({ viewer })}\n\n`)
+  response.on('close', () => {
+    viewers.delete(viewer)
+    watch.stop()
+  })
+}
+
+/**
+ * The owner taking the wheel from a browser tab. Agent and owner may act at once.
+ * ponytail: no lock between them; add one if they really trip over each other.
+ */
+async function browserInput(memberId: string, body: Record<string, unknown>): Promise<void> {
+  const view = viewers.get(String(body.viewer))
+  if (view?.memberId !== memberId) throw new HttpError(409, 'notWatching')
+  if (typeof body.select === 'string') return view.watch.select(body.select)
+  if (body.history === -1 || body.history === 1) return goHistory(view.watch, body.history)
+  const params = body.params ?? {}
+  if (typeof body.method !== 'string' || !BROWSER_INPUT.has(body.method) || typeof params !== 'object') throw new HttpError(400, 'badInput')
+  await view.watch.call(body.method, params)
 }
 
 async function serveStatic(response: ServerResponse, pathname: string): Promise<void> {
