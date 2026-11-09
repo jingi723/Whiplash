@@ -33,6 +33,8 @@ const BLOCKED_GRACE_MS = 3000
 const SESSION_DISCOVERY_MS = 60_000
 /** A typed prompt shows up in the transcript within seconds unless a dialog swallowed it. */
 const PROMPT_ACCEPT_MS = 20_000
+/** Claude Code starts a queued follow-up the moment a turn ends; this is long enough to see its prompt row. */
+const FOLLOW_UP_SETTLE_MS = 1500
 const HOST_START_MS = 10_000
 const HOST_RECONNECT_MS = 1000
 const HOST_PATH = fileURLToPath(new URL('./pty-host.ts', import.meta.url))
@@ -106,12 +108,15 @@ export function interactiveCommand(
   }
 }
 
-type TurnEnd = { prompted: boolean; done: boolean; aborted: boolean }
+/** `length` is how much of `appended` the turn took, through its stop marker's line. */
+type TurnEnd = { prompted: boolean; done: boolean; aborted: boolean; length: number }
 
 /** A turn ends with a stop marker written after the prompt we typed; earlier markers belong to old turns. */
 export function findTurnEnd(harness: Harness, appended: string): TurnEnd {
   let prompted = false
+  let length = 0
   for (const line of appended.split('\n')) {
+    length += line.length + 1
     let row: { type?: string; subtype?: string; isSidechain?: boolean; message?: { content?: unknown }; payload?: { type?: string } }
     try {
       row = JSON.parse(line)
@@ -127,7 +132,7 @@ export function findTurnEnd(harness: Harness, appended: string): TurnEnd {
           (Array.isArray(content) && content.some((block) => block?.type === 'text')))
       prompted ||= isPrompt
       if (prompted && row.type === 'system' && (row.subtype === 'turn_duration' || row.subtype === 'stop_hook_summary')) {
-        return { prompted, done: true, aborted: false }
+        return { prompted, done: true, aborted: false, length }
       }
     } else {
       // Turn markers and their aliases follow Orca's reconcileCodexTranscriptTurn (src/orca/codex-turn-transcript.ts).
@@ -135,14 +140,14 @@ export function findTurnEnd(harness: Harness, appended: string): TurnEnd {
       const kind = payload?.type
       prompted ||= kind === 'task_started' || kind === 'turn_started'
       if (prompted && (kind === 'task_complete' || kind === 'turn_complete')) {
-        return { prompted, done: true, aborted: false }
+        return { prompted, done: true, aborted: false, length }
       }
       if (prompted && kind === 'turn_aborted') {
-        return { prompted, done: true, aborted: payload?.reason === 'interrupted' || payload?.reason === undefined }
+        return { prompted, done: true, aborted: payload?.reason === 'interrupted' || payload?.reason === undefined, length }
       }
     }
   }
-  return { prompted, done: false, aborted: false }
+  return { prompted, done: false, aborted: false, length: appended.length }
 }
 
 async function readFrom(path: string, offset: number): Promise<string> {
@@ -403,6 +408,7 @@ export function createTerminalHub(
     let offset = path ? (await stat(path)).size : 0
     await submit(session.pty, prompt)
     const sentAt = Date.now()
+    const replies: string[] = []
     while (true) {
       await delay(POLL_MS)
       if (signal.aborted) {
@@ -421,17 +427,24 @@ export function createTerminalHub(
         }
         continue
       }
-      const end = findTurnEnd(member.harness, await readFrom(path, offset))
+      const appended = await readFrom(path, offset)
+      const end = findTurnEnd(member.harness, appended)
       const dialogShowing = session.status?.state === 'blocked' && Date.now() - sentAt > BLOCKED_GRACE_MS
       if (!end.prompted && (waitedTooLong || dialogShowing)) {
         return { ok: false, text: '', blocked: true }
       }
       if (end.done) {
-        const turn = parseTranscriptTurn(await readFrom(path, offset))
+        // Only this turn's rows: a follow-up typed in during it may already have started the next one.
+        const segment = appended.slice(0, end.length)
+        replies.push(parseTranscriptTurn(segment).text)
         const sessionId = session.sessionId ?? member.sessionId
-        return end.aborted
-          ? { ok: false, text: turn.text, error: 'Turn interrupted', sessionId }
-          : { ok: true, text: turn.text, sessionId }
+        const text = replies.filter(Boolean).join('\n\n')
+        if (end.aborted) return { ok: false, text, error: 'Turn interrupted', sessionId }
+        // A follow-up that arrived as the turn was ending runs as its own turn; its answer belongs here too.
+        await delay(FOLLOW_UP_SETTLE_MS)
+        const rest = (await readFrom(path, offset)).slice(end.length)
+        if (!findTurnEnd(member.harness, rest).prompted) return { ok: true, text, sessionId }
+        offset += Buffer.byteLength(segment, 'utf8')
       }
     }
   }

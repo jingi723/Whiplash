@@ -21,13 +21,19 @@ describe('interactiveCommand', () => {
   })
 })
 
+/** The turn state without how far it reached, which the cases below do not care about. */
+const turnEnd = (harness: 'claude' | 'codex', appended: string) => {
+  const { length: _length, ...state } = findTurnEnd(harness, appended)
+  return state
+}
+
 describe('findTurnEnd', () => {
   const stop = { type: 'system', subtype: 'stop_hook_summary' }
 
   it('ignores a stop marker that arrives before the typed prompt', () => {
-    assert.deepEqual(findTurnEnd('claude', jsonl(stop)), { prompted: false, done: false, aborted: false })
+    assert.deepEqual(turnEnd('claude', jsonl(stop)), { prompted: false, done: false, aborted: false })
     assert.deepEqual(
-      findTurnEnd('claude', jsonl({ type: 'user', message: { content: [{ type: 'tool_result' }] } }, stop)),
+      turnEnd('claude', jsonl({ type: 'user', message: { content: [{ type: 'tool_result' }] } }, stop)),
       { prompted: false, done: false, aborted: false }
     )
   })
@@ -39,30 +45,38 @@ describe('findTurnEnd', () => {
       { type: 'assistant', message: { content: [{ type: 'text', text: 'hi' }] } },
       { type: 'system', subtype: 'turn_duration' }
     )
-    assert.deepEqual(findTurnEnd('claude', appended), { prompted: true, done: true, aborted: false })
+    assert.deepEqual(turnEnd('claude', appended), { prompted: true, done: true, aborted: false })
   })
 
   it('ends a Codex turn on completion or abort, after it started', () => {
     const event = (type: string) => ({ type: 'event_msg', payload: { type } })
-    assert.deepEqual(findTurnEnd('codex', jsonl(event('task_complete'))), {
+    assert.deepEqual(turnEnd('codex', jsonl(event('task_complete'))), {
       prompted: false,
       done: false,
       aborted: false
     })
-    assert.deepEqual(findTurnEnd('codex', jsonl(event('task_started'), event('task_complete'))), {
+    assert.deepEqual(turnEnd('codex', jsonl(event('task_started'), event('task_complete'))), {
       prompted: true,
       done: true,
       aborted: false
     })
-    assert.deepEqual(findTurnEnd('codex', jsonl(event('turn_started'), event('turn_complete'))), {
+    assert.deepEqual(turnEnd('codex', jsonl(event('turn_started'), event('turn_complete'))), {
       prompted: true,
       done: true,
       aborted: false
     })
-    assert.deepEqual(findTurnEnd('codex', jsonl(event('task_started'), event('turn_aborted'))), {
+    assert.deepEqual(turnEnd('codex', jsonl(event('task_started'), event('turn_aborted'))), {
       prompted: true,
       done: true,
       aborted: true
     })
+  })
+
+  it('stops at its own stop marker, so a follow-up turn after it is not read as this one', () => {
+    const first = jsonl({ type: 'user', message: { content: '하나' } }, { type: 'assistant', message: { content: [{ type: 'text', text: '1' }] } }, stop)
+    const next = jsonl({ type: 'user', message: { content: '둘' } })
+    const end = findTurnEnd('claude', `${first}\n${next}`)
+    assert.equal(end.length, first.length + 1)
+    assert.equal(turnEnd('claude', next).prompted, true)
   })
 })
