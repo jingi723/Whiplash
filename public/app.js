@@ -535,12 +535,6 @@ function messageRow(channel, message) {
             onClick: () => setReplyTo(channel, member, { focus: true, messageId: message.id })
           },
           t('message.reply')
-        ),
-      member &&
-        h(
-          'button',
-          { class: 'tempo', type: 'button', onClick: () => reject(member) },
-          'Not quite my tempo'
         )
     ),
     markdown(message.text, channel.members, message.attachments)
@@ -1327,7 +1321,6 @@ function agentMenu(channel, member) {
     { icon: 'moon', label: t('menu.sleep'), disabled: !terminalOpen, run: () => api(`members/${member.id}/terminal/close`, {}) },
     { icon: 'refresh', label: t('menu.resetSession'), disabled: Boolean(ui.activity[member.id]), run: () => resetSessionDialog(member) },
     { icon: 'square', label: t('studio.stop'), disabled: !ui.activity[member.id], run: () => api(`members/${member.id}/stop`, {}) },
-    { icon: 'x', label: 'Not quite my tempo', run: () => reject(member) },
     '-',
     { icon: 'trash', label: t('menu.remove'), danger: true, run: () => removeMemberDialog(channel, member) }
   ]

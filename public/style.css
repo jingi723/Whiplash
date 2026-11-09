@@ -326,15 +326,6 @@ button.who:hover {
   opacity: 1;
 }
 
-.tempo:hover {
-  border-color: var(--danger);
-  color: var(--danger);
-}
-
-.tempo + .tempo {
-  margin-left: 0;
-}
-
 .reply:hover,
 .reply[aria-pressed='true'] {
   border-color: var(--brand);
