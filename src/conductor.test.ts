@@ -80,6 +80,31 @@ describe('conductor', () => {
     assert.equal(channel.members[0].sessionId, 's')
   })
 
+  it("types a follow-up into a Claude terminal turn that is still running, so it needs no second turn", async () => {
+    const state = room()
+    const channel = state.channels[0]
+    const prompts: string[] = []
+    const injected: string[] = []
+    const { conductor, idle } = conduct(
+      state,
+      async (_member, prompt) => {
+        prompts.push(prompt)
+        await new Promise((resolve) => setTimeout(resolve, 20))
+        return { ok: true, text: '둘 다 했어요', sessionId: 's' }
+      },
+      { canInject: () => true, inject: async (_member, prompt) => void injected.push(prompt) }
+    )
+    channel.members[0].sessionId = 's'
+    const done = idle()
+    conductor.sendHumanMessage(channel, '@Coder 하나')
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    conductor.sendHumanMessage(channel, '@Coder 둘')
+    await done
+    assert.deepEqual(prompts, ['@Coder 하나'])
+    assert.deepEqual(injected, ['@Coder 둘'])
+    assert.deepEqual(texts(state), ['@Coder 하나', '@Coder 둘', '둘 다 했어요'])
+  })
+
   it('folds mentions that arrive before the prompt is built into one turn', async () => {
     const state = room()
     const channel = state.channels[0]

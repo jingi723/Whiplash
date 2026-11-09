@@ -1,8 +1,9 @@
 'use strict'
 // Whiplash desktop: the same local server and page, in an Electron window like Orca's.
-const { app, BrowserWindow, shell, nativeImage } = require('electron')
+const { app, BrowserWindow, ipcMain, shell, nativeImage } = require('electron')
 const { spawn } = require('node:child_process')
-const { readFileSync, writeFileSync } = require('node:fs')
+const { mkdirSync, openSync, readFileSync, writeFileSync } = require('node:fs')
+const os = require('node:os')
 const net = require('node:net')
 const path = require('node:path')
 const { hydrateShellPath } = require('./shell-path.cjs')
@@ -47,28 +48,36 @@ async function runningWhiplash(port) {
   }
 }
 
-function startServer(port) {
-  return new Promise((resolve, reject) => {
-    // Electron's own Node runs the server, so the app needs no system Node.
-    server = spawn(process.execPath, [path.join(root, 'src', 'server.ts')], {
-      cwd: root,
-      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', PORT: String(port) },
-      stdio: ['ignore', 'pipe', 'inherit']
-    })
-    const timer = setTimeout(() => reject(new Error('Whiplash server did not start')), SERVER_READY_TIMEOUT_MS)
-    server.stdout.on('data', (chunk) => {
-      process.stdout.write(chunk)
-      if (String(chunk).includes('Whiplash: http')) {
-        clearTimeout(timer)
-        resolve()
-      }
-    })
-    server.once('exit', (code) => {
-      clearTimeout(timer)
-      server = null
-      reject(new Error(`Whiplash server exited (${code})`))
-    })
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+/**
+ * Starts the server on Electron's own Node, so the app needs no system Node. On the default port it is
+ * detached, like Orca's terminal daemon: quitting the app leaves agents and their terminals running,
+ * and the next launch reattaches. A fallback port is not found again on relaunch, so that server
+ * stays tied to this app and stops with it rather than becoming a second writer of the same state.
+ */
+async function startServer(port) {
+  const keep = port === DEFAULT_PORT
+  const home = process.env.WHIPLASH_HOME || path.join(os.homedir(), '.whiplash')
+  mkdirSync(home, { recursive: true })
+  const log = openSync(path.join(home, 'server.log'), 'a')
+  const child = spawn(process.execPath, [path.join(root, 'src', 'server.ts')], {
+    cwd: root,
+    env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', PORT: String(port) },
+    detached: keep,
+    stdio: ['ignore', log, log]
   })
+  if (keep) child.unref()
+  else server = child
+  let exited = null
+  child.once('exit', (code) => (exited = code))
+  const deadline = Date.now() + SERVER_READY_TIMEOUT_MS
+  while (Date.now() < deadline) {
+    if (exited !== null) throw new Error(`Whiplash server exited (${exited}); see ${path.join(home, 'server.log')}`)
+    if (await runningWhiplash(port)) return
+    await sleep(200)
+  }
+  throw new Error('Whiplash server did not start')
 }
 
 async function ensureServer() {
@@ -125,6 +134,27 @@ function createWindow() {
   void window.loadURL(origin)
 }
 
+// The page's unread count on the Dock icon, and a notification click bringing the window forward.
+ipcMain.on('whiplash:badge', (_event, count) => app.setBadgeCount(Math.max(0, Math.floor(Number(count) || 0))))
+ipcMain.on('whiplash:focus', () => {
+  const [window] = BrowserWindow.getAllWindows()
+  if (window) {
+    if (window.isMinimized()) window.restore()
+    window.show()
+    window.focus()
+  }
+})
+
+// Only our own page can reach these; the window never loads another origin.
+ipcMain.on('whiplash:badge', (_event, count) => app.setBadgeCount(Math.max(0, Math.floor(Number(count)) || 0)))
+ipcMain.on('whiplash:focus', (event) => {
+  const window = BrowserWindow.fromWebContents(event.sender)
+  if (!window) return
+  if (window.isMinimized()) window.restore()
+  window.show()
+  window.focus()
+})
+
 app.on('second-instance', () => {
   const [window] = BrowserWindow.getAllWindows()
   if (window) {
@@ -158,6 +188,6 @@ app.on('window-all-closed', () => {
 })
 
 app.on('before-quit', () => {
-  // Only the server this app started is stopped; a server someone else runs keeps running.
+  // Only a fallback-port server is tied to the app; the default-port server outlives it.
   server?.kill('SIGTERM')
 })

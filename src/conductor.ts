@@ -6,16 +6,20 @@ import {
   AGENT_CHAIN_LIMIT,
   buildTurnPrompt,
   CHANNEL_MESSAGE_LIMIT,
+  deliveredThrough,
   english,
   findMentions,
+  markDelivered,
   parseTempoCommand,
   planHandoffs,
   projectFolder,
   tempoMessage,
+  type Attachment,
   type Author,
   type Channel,
   type Locale,
   type Member,
+  type Message,
   type Notice,
   type State
 } from './model.ts'
@@ -36,6 +40,10 @@ export type ConductorDeps = {
   runCheck: (command: string, cwd: string, signal: AbortSignal) => Promise<string | null>
   /** True while Whiplash itself drives the session in an open terminal, so its writes are not foreign. */
   isAttached?: (member: Member) => boolean
+  /** True while the member's terminal reports a turn in progress, so typed words join that turn. */
+  canInject?: (member: Member) => boolean
+  /** Types words into the member's running terminal turn; that turn's reply then answers them too. */
+  inject?: (member: Member, prompt: string) => Promise<void>
   onChange: () => void
   onStudioEvent: (memberId: string, event: StudioEvent) => void
 }
@@ -71,17 +79,19 @@ export async function runShellCheck(
 export function createConductor(deps: ConductorDeps) {
   const { state } = deps
   const running = new Map<string, AbortController>()
-  const pending = new Set<string>()
+  /** Channels a busy member still owes a turn; #all and its home channel can both be waiting. */
+  const pending = new Map<string, Set<Channel>>()
+  const runningIn = new Map<string, Channel>()
   const activity = new Map<string, Activity>()
 
   const channelOf = (memberId: string): Channel | undefined =>
-    state.channels.find(({ members }) => members.some(({ id }) => id === memberId))
+    state.channels.find(({ everyone, members }) => !everyone && members.some(({ id }) => id === memberId))
 
   function append(
     channel: Channel,
     author: Author,
     text: string,
-    extra: { alertMemberId?: string; notice?: Notice } = {}
+    extra: Pick<Message, 'alertMemberId' | 'notice' | 'attachments'> = {}
   ): void {
     channel.messages.push({ id: randomUUID(), seq: channel.nextSeq++, author, text, at: Date.now(), ...extra })
     channel.messages.splice(0, channel.messages.length - CHANNEL_MESSAGE_LIMIT)
@@ -108,26 +118,39 @@ export function createConductor(deps: ConductorDeps) {
   function hasUnseenMessage(channel: Channel, member: Member): boolean {
     return channel.messages.some(
       ({ seq, author }) =>
-        seq > member.deliveredThrough &&
+        seq > deliveredThrough(channel, member) &&
         !(author.kind === 'agent' && author.memberId === member.id) &&
         author.kind !== 'system'
     )
   }
 
   function requestTurn(channel: Channel, member: Member): void {
+    // Claude Code takes input mid-turn and folds it into the turn it is running, so a follow-up in the same
+    // room goes in at once instead of waiting for the answer. Codex would start a separate turn, so it waits.
+    if (running.has(member.id) && runningIn.get(member.id) === channel && member.harness === 'claude' && deps.inject && deps.canInject?.(member)) {
+      const prompt = buildTurnPrompt(channel, member)
+      markDelivered(channel, member)
+      void deps.inject(member, prompt)
+      deps.onChange()
+      return
+    }
     if (running.has(member.id)) {
-      pending.add(member.id)
+      pending.set(member.id, (pending.get(member.id) ?? new Set()).add(channel))
       deps.onChange()
       return
     }
     const controller = new AbortController()
     running.set(member.id, controller)
+    runningIn.set(member.id, channel)
     setActivity(member.id, 'working')
     void playTurn(channel, member, controller).finally(() => {
       running.delete(member.id)
+      runningIn.delete(member.id)
       setActivity(member.id, null)
-      if (pending.delete(member.id) && hasUnseenMessage(channel, member)) {
-        requestTurn(channel, member)
+      const queued = pending.get(member.id) ?? []
+      pending.delete(member.id)
+      for (const waiting of queued) {
+        if (hasUnseenMessage(waiting, member)) requestTurn(waiting, member)
       }
     })
   }
@@ -156,7 +179,7 @@ export function createConductor(deps: ConductorDeps) {
       return
     }
     const prompt = buildTurnPrompt(channel, member)
-    member.deliveredThrough = channel.nextSeq - 1
+    markDelivered(channel, member)
     const result = await deps.runTurn(
       member,
       prompt,
@@ -227,11 +250,11 @@ export function createConductor(deps: ConductorDeps) {
     }
   }
 
-  function sendHumanMessage(channel: Channel, text: string, locale: Locale = 'en'): void {
+  function sendHumanMessage(channel: Channel, text: string, locale: Locale = 'en', attachments: Attachment[] = []): void {
     const tempo = parseTempoCommand(text)
     const body = tempo ? tempoMessage(tempo.name, tempo.reason, locale) : text
     channel.agentChain = 0
-    append(channel, { kind: 'human' }, body)
+    append(channel, { kind: 'human' }, body, attachments.length && !tempo ? { attachments } : {})
     const mentioned = findMentions(
       body,
       channel.members.map(({ name }) => name)
@@ -247,7 +270,7 @@ export function createConductor(deps: ConductorDeps) {
     channelOf,
     isUsedElsewhere,
     activityOf: (): Record<string, Activity> => Object.fromEntries(activity),
-    queuedOf: (): string[] => [...pending],
+    queuedOf: (): string[] => [...pending.keys()],
     reject(memberId: string, locale: Locale = 'en'): void {
       const channel = channelOf(memberId)
       const member = channel?.members.find(({ id }) => id === memberId)

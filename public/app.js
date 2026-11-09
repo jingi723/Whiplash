@@ -1,7 +1,7 @@
 // Agent output is untrusted and this page can drive agents, so every value goes through textContent.
 import { addressTo } from './compose.js'
 import { createTranslator, pickLocale } from './i18n.js'
-import { colorMode, measure, mountTerminal, terminalTheme } from './terminal.js'
+import { acceptFileDrops, colorMode, droppedPaths, measure, mountTerminal, readScreen, reportTerminalColors, shellEscape, terminalTheme } from './terminal.js'
 import { formatResetDuration } from './orca/rate-limit-reset-format.js'
 import { formatRateLimitWindowChipLabel, formatWindowLabel } from './orca/rate-limit-window-label.js'
 import { barColor, clampUsedPercent } from './orca/usage-bar.js'
@@ -417,13 +417,6 @@ function staminaBar(member) {
   )
 }
 
-function staminaLabel(member) {
-  const percent = staminaOf(member)
-  if (percent === 0) return t('stamina.out')
-  if (percent <= LOW_STAMINA) return t('stamina.low', { percent })
-  return t(percent < 60 ? 'stamina.tired' : 'stamina.fresh', { percent })
-}
-
 /** The terminal's own OSC 7501 report wins while it is open: it sees approvals and work typed straight into it. */
 function liveState(member) {
   const reported = ui.terminalStatus[member.id]?.state
@@ -432,29 +425,26 @@ function liveState(member) {
   return ui.activity[member.id] ?? (ui.terminals.includes(member.id) ? 'attached' : 'idle')
 }
 
-function activityLabel(member) {
-  const state = liveState(member)
-  if (state === 'waiting') return h('span', { class: 'tag waiting' }, t('activity.waiting'))
-  const activity = state === 'working' ? 'working' : ui.activity[member.id]
-  const queued = ui.queued.includes(member.id) ? t('activity.queued') : ''
-  if (activity === 'working') return h('span', { class: 'tag live' }, `${t('activity.working')}${queued}`)
-  if (activity === 'checking') return h('span', { class: 'tag live' }, `${t('activity.checking')}${queued}`)
-  return h('span', { class: 'tag' }, member.harness)
-}
-
 const projectFolder = (member) => member.writableRoots?.[0] ?? member.cwd
 
-function inline(text, members) {
+const PASTE_PREVIEW_CHARS = 600
+
+function inline(text, members, attachments = []) {
   const names = new Set(members.map(({ name }) => name.toLowerCase()).concat('all'))
+  const pasted = new Map(attachments.map((attachment) => [attachment.token, attachment]))
   const nodes = []
-  const pattern = /(`[^`\n]+`)|(\*\*[^*\n]+\*\*)|(@[\p{L}\p{N}_-]+)/gu
+  const pattern = /(`[^`\n]+`)|(\*\*[^*\n]+\*\*)|(@[\p{L}\p{N}_-]+)|(\[(?:Image #\d+|Pasted text #\d+ \+\d+ lines)\])/gu
   let cursor = 0
   for (const match of text.matchAll(pattern)) {
     nodes.push(text.slice(cursor, match.index))
     const [token] = match
     if (match[1]) nodes.push(h('code', {}, token.slice(1, -1)))
     else if (match[2]) nodes.push(h('strong', {}, token.slice(2, -2)))
-    else if (names.has(token.slice(1).toLowerCase())) nodes.push(h('span', { class: 'mention' }, token))
+    else if (match[4] && pasted.has(token)) {
+      const item = pasted.get(token)
+      const title = item.kind === 'image' ? item.path : item.text.slice(0, PASTE_PREVIEW_CHARS)
+      nodes.push(h('span', { class: 'paste-chip', title }, icon(item.kind === 'image' ? 'image' : 'file', 'icon'), token))
+    } else if (match[3] && names.has(token.slice(1).toLowerCase())) nodes.push(h('span', { class: 'mention' }, token))
     else nodes.push(token)
     cursor = match.index + token.length
   }
@@ -462,7 +452,7 @@ function inline(text, members) {
   return nodes
 }
 
-function markdown(text, members) {
+function markdown(text, members, attachments) {
   const parts = text.split(/```[^\n]*\n?/)
   return h(
     'div',
@@ -470,7 +460,7 @@ function markdown(text, members) {
     parts.map((part, index) =>
       index % 2 === 1
         ? h('pre', {}, h('code', {}, part.replace(/\n$/, '')))
-        : part.trim() && h('p', {}, inline(part.trim(), members))
+        : part.trim() && h('p', {}, inline(part.trim(), members, attachments))
     )
   )
 }
@@ -501,11 +491,17 @@ function messageRow(channel, message) {
     )
   }
   const member = author.kind === 'agent' && channel.members.find(({ id }) => id === author.memberId)
-  const name = author.kind === 'human' ? t('message.conductor') : `@${author.name}`
+  const name = author.kind === 'human' ? t('message.conductor') : author.name
+  // Slack's avatar column: the master's mark, or the agent's CLI, so turns read apart at a glance.
+  const avatar = h(
+    'span',
+    { class: `avatar ${author.kind}`, 'aria-hidden': 'true' },
+    author.kind === 'human' ? icon('circle-user') : member ? providerIcon(member.harness === 'codex' ? 'codex' : 'claude') : author.name.slice(0, 1)
+  )
   return h(
     'article',
     {
-      class: `message${member ? ' selectable' : ''}`,
+      class: `message ${author.kind}${member ? ' selectable' : ''}`,
       'data-message': message.id,
       onClick: (event) => {
         // Selecting text or pressing a button inside the message must not retarget the composer.
@@ -521,6 +517,7 @@ function messageRow(channel, message) {
         setReplyTo(channel, member, { messageId: message.id })
       }
     },
+    avatar,
     h(
       'header',
       {},
@@ -546,12 +543,64 @@ function messageRow(channel, message) {
           'Not quite my tempo'
         )
     ),
-    markdown(message.text, channel.members)
+    markdown(message.text, channel.members, message.attachments)
   )
 }
 
+const DRAFTS_KEY = 'whiplash.drafts'
+const drafts = readJson(DRAFTS_KEY, {})
+let draftTimer = null
+
+// Claude Code's paste handling: an image, or a long paste, sits in the text as a short token.
+const PASTE_COLLAPSE_CHARS = 800
+const PASTE_COLLAPSE_LINES = 10
+const IMAGE_FILE = /\.(png|jpe?g|gif|webp|heic|bmp|tiff?)$/i
+
+// Sent messages per channel, recalled with ↑ and ↓ as in Claude Code's prompt; pastes come back with them.
+const HISTORY_KEY = 'whiplash.history'
+const HISTORY_LIMIT = 50
+const sentHistory = readJson(HISTORY_KEY, {})
+
+function remember(channelId, text, attachments) {
+  const entries = (sentHistory[channelId] ?? []).filter((entry) => entry.text !== text)
+  sentHistory[channelId] = [...entries, { text, attachments }].slice(-HISTORY_LIMIT)
+  writeStored(HISTORY_KEY, JSON.stringify(sentHistory))
+}
+
+function saveDraft(channelId, text, attachments = []) {
+  const kept = attachments.filter(({ token }) => text.includes(token))
+  if (text) drafts[channelId] = kept.length ? { text, attachments: kept } : text
+  else delete drafts[channelId]
+  clearTimeout(draftTimer)
+  draftTimer = setTimeout(() => writeStored(DRAFTS_KEY, JSON.stringify(drafts)), 300)
+}
+
 function createComposer(channelId) {
-  const input = h('textarea', { rows: 2 })
+  // A half-written command outlives switching tabs, channels or reloading, as Orca keeps its composer drafts.
+  const input = h('textarea', { rows: 1 })
+  const draft = drafts[channelId]
+  input.value = typeof draft === 'string' ? draft : (draft?.text ?? '')
+  let attachments = typeof draft === 'object' && draft ? draft.attachments : []
+  // -1 is the draft being written; 0 the newest sent message, and so on back.
+  let recalled = -1
+  let held = null
+  const load = (entry) => {
+    input.value = entry.text
+    attachments = entry.attachments ?? []
+    input.setSelectionRange(input.value.length, input.value.length)
+    saveDraft(channelId, input.value, attachments)
+    refresh()
+  }
+  /** ↑ on the first line walks back through sent messages, ↓ on the last line forward to the draft again. */
+  const recall = (step) => {
+    const entries = sentHistory[channelId] ?? []
+    const target = recalled + step
+    if (target < -1 || target >= entries.length) return false
+    if (recalled === -1) held = { text: input.value, attachments }
+    recalled = target
+    load(target === -1 ? held : entries[entries.length - 1 - target])
+    return true
+  }
   const list = h('ul', { class: 'suggestions', role: 'listbox', hidden: true })
   let active = 0
 
@@ -598,7 +647,35 @@ function createComposer(channelId) {
     )
   }
   const chip = h('span', { class: 'chip', hidden: true })
-  const box = h('div', { class: 'composer-box' }, chip, input)
+  const box = h('div', { class: 'composer-box', 'data-drop-hint': t('composer.drop') }, chip, input)
+  const insertText = (text) => {
+    const before = input.value.slice(0, input.selectionStart)
+    input.setRangeText(`${before && !/\s$/.test(before) ? ' ' : ''}${text} `, input.selectionStart, input.selectionEnd, 'end')
+    saveDraft(channelId, input.value, attachments)
+    input.focus()
+  }
+  const nextNumber = (kind) => 1 + Math.max(0, ...attachments.filter((item) => item.kind === kind).map(({ token }) => Number(/#(\d+)/.exec(token)[1])))
+  const attach = (attachment) => {
+    attachments = [...attachments, attachment]
+    return attachment.token
+  }
+  const imageToken = (path) => attach({ token: `[Image #${nextNumber('image')}]`, kind: 'image', path })
+  // Other paths go in backticks: a code span is never read as an @mention (node_modules/@scope/...).
+  const insertPaths = (paths) => insertText(paths.map((path) => (IMAGE_FILE.test(path) ? imageToken(path) : `\`${path}\``)).join(' '))
+  input.addEventListener('paste', async (event) => {
+    const images = [...event.clipboardData.files].filter((file) => file.type.startsWith('image/'))
+    if (images.length) {
+      event.preventDefault()
+      const paths = await droppedPaths({ files: images })
+      if (paths.length) insertText(paths.map(imageToken).join(' '))
+      return
+    }
+    const text = event.clipboardData.getData('text/plain')
+    const lines = text.split('\n').length
+    if (text.length <= PASTE_COLLAPSE_CHARS && lines <= PASTE_COLLAPSE_LINES) return
+    event.preventDefault()
+    insertText(attach({ token: `[Pasted text #${nextNumber('text')} +${lines} lines]`, kind: 'text', text }))
+  })
   box.addEventListener('animationend', () => box.classList.remove('lash'))
   const showTarget = (member) => {
     chip.hidden = !member
@@ -618,25 +695,36 @@ function createComposer(channelId) {
           ]
         : [])
     )
+    // The chip sits over the first line only, as Slack's: later lines start at the left edge.
+    input.style.textIndent = member ? `${chip.offsetWidth + 6}px` : ''
   }
   const submit = async () => {
     const typed = input.value.trim()
     if (!typed) return
     const replyTo = currentChannel()?.members.find(({ id }) => id === ui.replyTo[channelId])
     const text = addressTo(typed, replyTo?.name)
+    const sent = attachments.filter(({ token }) => text.includes(token))
+    remember(channelId, typed, sent)
+    recalled = -1
     input.value = ''
+    attachments = []
+    saveDraft(channelId, '')
     refresh()
     box.classList.remove('lash')
     void box.offsetWidth
     box.classList.add('lash')
-    await api(`channels/${channelId}/messages`, { text, locale }).catch((error) => {
+    await api(`channels/${channelId}/messages`, { text, locale, attachments: sent }).catch((error) => {
       input.value = typed
+      attachments = sent
+      saveDraft(channelId, typed, sent)
       alert(error.message)
     })
   }
 
   input.addEventListener('input', () => {
     active = 0
+    recalled = -1
+    saveDraft(channelId, input.value, attachments)
     refresh()
   })
   input.addEventListener('click', refresh)
@@ -657,6 +745,16 @@ function createComposer(channelId) {
         return
       }
     }
+    const caret = input.selectionStart
+    const collapsed = caret === input.selectionEnd
+    if (event.key === 'ArrowUp' && collapsed && !input.value.slice(0, caret).includes('\n') && recall(1)) {
+      event.preventDefault()
+      return
+    }
+    if (event.key === 'ArrowDown' && collapsed && recalled >= 0 && !input.value.slice(caret).includes('\n') && recall(-1)) {
+      event.preventDefault()
+      return
+    }
     const atStart = input.selectionStart === 0 && input.selectionEnd === 0
     if (ui.replyTo[channelId] && (event.key === 'Escape' || (event.key === 'Backspace' && atStart))) {
       event.preventDefault()
@@ -668,7 +766,7 @@ function createComposer(channelId) {
       void submit()
     }
   })
-  return { element: h('div', { class: 'composer' }, list, box), input, list, showTarget }
+  return { element: h('div', { class: 'composer' }, list, box), input, list, showTarget, insertPaths }
 }
 
 let targetBeforeClick = {}
@@ -722,18 +820,26 @@ function renderMessages(channel) {
   list.append(...fresh.map((message) => messageRow(channel, message)))
   if (ids.length === 0) {
     list.replaceChildren(
-      h(
-        'div',
-        { class: 'empty' },
-        h('strong', {}, t('stage.emptyTitle')),
-        t('stage.emptyBody'),
-        h(
-          'div',
-          { class: 'actions' },
-          h('button', { class: 'primary', type: 'button', onClick: () => importDialog(channel) }, t('stage.import')),
-          h('button', { class: 'ghost', type: 'button', onClick: () => hireDialog(channel) }, t('stage.hire'))
-        )
-      )
+      channel.members.length || channel.everyone
+        ? // Members are already here: the empty log only needs to say how to call them.
+          h(
+            'div',
+            { class: 'empty' },
+            h('strong', {}, t('stage.readyTitle')),
+            channel.members.length ? t('stage.readyBody', { names: channel.members.map(({ name }) => `@${name}`).join(', ') }) : t('stage.everyoneEmpty')
+          )
+        : h(
+            'div',
+            { class: 'empty' },
+            h('strong', {}, t('stage.emptyTitle')),
+            t('stage.emptyBody'),
+            h(
+              'div',
+              { class: 'actions' },
+              h('button', { class: 'primary', type: 'button', onClick: () => importDialog(channel) }, t('stage.import')),
+              h('button', { class: 'ghost', type: 'button', onClick: () => hireDialog(channel) }, t('stage.hire'))
+            )
+          )
     )
   }
   shell.messageIds = ids
@@ -746,7 +852,128 @@ function createShell(channelId) {
   const composer = createComposer(channelId)
   const bar = h('div', { class: 'page-toolbar' })
   const list = h('div', { class: 'messages', role: 'log' })
-  return { channelId, messageIds: [], membersKey: '', composer, bar, list, node: h('section', { class: 'stage' }, bar, list, composer.element) }
+  const typing = h('div', { class: 'typing', 'aria-live': 'polite' })
+  const node = h('section', { class: 'stage' }, bar, list, typing, composer.element)
+  // Files dropped anywhere on the stage go into the message as paths.
+  acceptFileDrops(node, composer.insertPaths)
+  return { channelId, messageIds: [], membersKey: '', composer, bar, list, typing, node }
+}
+
+const nameButtons = (members) =>
+  members.flatMap((member, index) => [
+    index > 0 ? ', ' : '',
+    h('button', { class: 'typing-name', type: 'button', onClick: () => openAgent(member.id) }, member.name)
+  ])
+
+/** Slack's typing line: who is writing (bouncing dots), checking, or stuck waiting for input in a terminal. */
+function renderTyping(channel, typing) {
+  const by = (state) => channel.members.filter((member) => liveState(member) === state)
+  const writing = by('working')
+  const checking = by('checking')
+  const waiting = by('waiting')
+  const rows = []
+  // The moving dots take the place of the ellipsis, right after what is happening.
+  const dots = () => h('span', { class: 'dots', 'aria-hidden': 'true' }, h('i'), h('i'), h('i'))
+  // Slack's form: who, then the moving dots; the words stay for screen readers only.
+  if (writing.length) rows.push(h('div', { class: 'typing-row', 'aria-label': `${writing.map(({ name }) => name).join(', ')} ${t('stage.typing')}` }, nameButtons(writing), dots()))
+  if (checking.length) rows.push(h('div', { class: 'typing-row' }, nameButtons(checking), ` ${t('stage.checking')}`, dots()))
+  for (const member of waiting) rows.push(promptCard(member))
+  for (const id of screens.keys()) if (!waiting.some((member) => member.id === id)) screens.delete(id)
+  typing.replaceChildren(...rows)
+}
+
+// --- What a waiting CLI is asking, mirrored into the chat so it can be answered without opening the terminal.
+const SCREEN_REFRESH_MS = 2000
+const PROMPT_MAX_LINES = 24
+const KEY_GAP_MS = 60
+const CURSOR_LINE = /^\s*[❯›]\s/
+const screens = new Map()
+
+/** The dialog at the bottom of the screen: from the rule above its menu down, without the talk above it. */
+function promptLines(lines) {
+  const end = lines.findLastIndex((line) => line.trim())
+  if (end < 0) return []
+  const cursor = lines.findLastIndex((line) => CURSOR_LINE.test(line))
+  const rule = lines.slice(0, cursor < 0 ? end : cursor).findLastIndex((line) => /[─━╌]{8,}|╭/.test(line))
+  let start = rule >= 0 ? rule + 1 : 0
+  while (start < end && !lines[start].trim()) start += 1
+  return lines.slice(Math.max(start, end + 1 - PROMPT_MAX_LINES), end + 1)
+}
+
+/**
+ * The CLI's selection menu: the item under the ❯ cursor and its siblings at the same indent. Deeper-indented
+ * lines between items are their descriptions. Works for numbered and unnumbered menus alike.
+ */
+function menuOf(lines) {
+  const cursor = lines.findLastIndex((line) => CURSOR_LINE.test(line))
+  if (cursor < 0) return null
+  const indent = lines[cursor].search(/[❯›]/)
+  const isItem = (line) => line.slice(0, indent).trim() === '' && /^[❯› ] \S/.test(line.slice(indent, indent + 3))
+  const isDetail = (line) => line.trim() && line.slice(0, indent + 3).trim() === ''
+  const rows = [cursor]
+  for (let row = cursor - 1; row >= 0 && (isItem(lines[row]) || isDetail(lines[row])); row -= 1) if (isItem(lines[row])) rows.unshift(row)
+  for (let row = cursor + 1; row < lines.length && (isItem(lines[row]) || isDetail(lines[row])); row += 1) if (isItem(lines[row])) rows.push(row)
+  return { items: rows.map((row) => lines[row].slice(indent + 2).trim()), selected: rows.indexOf(cursor) }
+}
+
+function watchScreen(member) {
+  const entry = screens.get(member.id) ?? { lines: [], timer: null }
+  screens.set(member.id, entry)
+  if (entry.timer) return entry
+  entry.timer = setTimeout(async () => {
+    const lines = promptLines(await readScreen(member.id))
+    if (screens.get(member.id) !== entry) return
+    entry.timer = null
+    if (lines.join('\n') !== entry.lines.join('\n')) {
+      entry.lines = lines
+      const channel = currentChannel()
+      if (shell && channel) renderTyping(channel, shell.typing)
+    }
+    // Keep the mirror current while the CLI waits; renderTyping drops the entry once it stops waiting.
+    if (liveState(member) === 'waiting') watchScreen(member)
+  }, entry.lines.length ? SCREEN_REFRESH_MS : 300)
+  return entry
+}
+
+/** One key per write: a TUI can read a burst of arrow keys as a single unknown sequence. */
+async function pressKeys(member, keys) {
+  for (const [index, data] of keys.entries()) {
+    if (index) await new Promise((resolve) => setTimeout(resolve, KEY_GAP_MS))
+    await api(`members/${member.id}/terminal/input`, { data })
+  }
+  const entry = screens.get(member.id)
+  if (entry) entry.lines = []
+}
+
+function promptCard(member) {
+  const { lines } = watchScreen(member)
+  const menu = menuOf(lines)
+  // Choosing an item walks the cursor there and confirms, as the arrow keys and Enter would.
+  const choose = (index) => {
+    const delta = index - menu.selected
+    void pressKeys(member, [...Array(Math.abs(delta)).fill(delta > 0 ? '\x1b[B' : '\x1b[A'), '\r'])
+  }
+  return h(
+    'div',
+    { class: 'prompt-card', role: 'group', 'aria-label': t('stage.waitingInput') },
+    h('div', { class: 'typing-row waiting' }, h('span', { class: 'dot waiting', 'aria-hidden': 'true' }), nameButtons([member]), ` ${t('stage.waitingInput')}`),
+    lines.length > 0 && h('pre', { class: 'prompt-screen' }, lines.join('\n')),
+    menu &&
+      h(
+        'div',
+        { class: 'prompt-menu' },
+        ...menu.items.map((item, index) =>
+          h('button', { class: index === menu.selected ? 'primary' : 'ghost', type: 'button', title: item, onClick: () => choose(index) }, item)
+        )
+      ),
+    h(
+      'div',
+      { class: 'prompt-actions' },
+      !menu && h('button', { class: 'ghost', type: 'button', onClick: () => void pressKeys(member, ['\r']) }, t('prompt.enter')),
+      h('button', { class: 'ghost', type: 'button', onClick: () => void pressKeys(member, ['\x1b']) }, t('prompt.escape')),
+      h('button', { class: 'ghost', type: 'button', onClick: () => openAgent(member.id) }, t('prompt.openTerminal'))
+    )
+  )
 }
 
 // Why the shell stays mounted: moving the textarea in the DOM would cancel a Hangul syllable mid-composition.
@@ -754,18 +981,21 @@ function renderStage(channel) {
   if (shell?.channelId !== channel.id) {
     shell = createShell(channel.id)
   }
-  const { composer, bar, list, node } = shell
+  const { composer, bar, list, typing, node } = shell
   const stick = list.scrollHeight - list.scrollTop - list.clientHeight < NEAR_BOTTOM_PX
   if (main.firstChild !== node) main.replaceChildren(node)
   composer.input.setAttribute('aria-label', t('composer.aria', { channel: channel.name }))
   composer.list.setAttribute('aria-label', t('composer.suggestions'))
   bar.replaceChildren(
     h('strong', {}, `# ${channel.name}`),
-    h('span', { class: 'path', title: channel.cwd }, channel.cwd),
+    channel.everyone
+      ? h('span', { class: 'path' }, t('stage.everyone', { count: channel.members.length }))
+      : h('span', { class: 'path', title: channel.cwd }, channel.cwd),
     channel.checkCommand && h('span', { class: 'tag', title: t('stage.checkTitle') }, t('stage.check', { command: channel.checkCommand }))
   )
   list.setAttribute('aria-label', t('stage.log', { channel: channel.name }))
   renderMessages(channel)
+  renderTyping(channel, typing)
   showReplyTarget(channel)
   if (stick) list.scrollTop = list.scrollHeight
 }
@@ -801,6 +1031,8 @@ function showLog() {
 async function openTerminal(memberId) {
   if (!studio || studio.memberId !== memberId) return
   const size = measure(studio.termSlot)
+  // The CLI asks for colors the moment it starts, before this page attaches.
+  await reportTerminalColors()
   await api(`members/${memberId}/terminal/open`, size).catch((error) => {
     const hint = studio?.memberId === memberId && studio.termSlot.querySelector('.terminal-closed .hint')
     if (hint) hint.textContent = error.message
@@ -836,12 +1068,16 @@ function disposeStudio() {
 function renderStudio(member) {
   if (studio?.memberId !== member.id) {
     disposeStudio()
-    const bar = h('div', { class: 'page-toolbar' })
     const termSlot = h('div', { class: 'terminal-slot' })
     // The slot shares the terminal theme's background so Orca's colors meet the edge without a seam.
     termSlot.style.background = terminalTheme().background
-    const page = h('section', { class: 'studio-page' }, bar, termSlot)
-    studio = { memberId: member.id, page, bar, termSlot, term: null, log: [], logView: null, autoOpened: false }
+    // Dropping files on the terminal types their paths, as in Orca.
+    acceptFileDrops(termSlot, (paths) => {
+      if (ui.terminals.includes(member.id)) void api(`members/${member.id}/terminal/input`, { data: `${paths.map(shellEscape).join(' ')} ` })
+    })
+    // No toolbar: the tab, the sidebar card and its menu already show and do everything it held.
+    const page = h('section', { class: 'studio-page' }, termSlot)
+    studio = { memberId: member.id, page, termSlot, term: null, log: [], logView: null, autoOpened: false }
     main.replaceChildren(page)
     showLog()
     void loadLog(member)
@@ -849,18 +1085,6 @@ function renderStudio(member) {
     main.replaceChildren(studio.page)
   }
   const busy = Boolean(ui.activity[member.id])
-  const open = ui.terminals.includes(member.id)
-  studio.bar.replaceChildren(
-    h('strong', {}, `@${member.name}`),
-    activityLabel(member),
-    h('span', { class: 'path', title: t('studio.sessionFolder', { path: member.cwd }) }, projectFolder(member)),
-    h('span', { class: 'spacer' }),
-    h('div', { class: 'toolbar-stamina' }, staminaLabel(member), staminaBar(member)),
-    open
-      ? studioButton(t('studio.closeTerminal'), 'ghost', () => api(`members/${member.id}/terminal/close`, {}))
-      : studioButton(t('studio.stop'), 'ghost', () => api(`members/${member.id}/stop`, {}), !busy),
-    studioButton('Not quite my tempo', 'danger', () => reject(member))
-  )
   const startButton = studio.termSlot.querySelector('.terminal-closed .primary')
   if (startButton) startButton.disabled = busy
   syncTerminal(member)
@@ -928,6 +1152,8 @@ function renderChannels() {
         },
         h('span', { class: 'chev-hit', onClick: toggle }, icon('chevron-down', 'icon chev')),
         h('span', { class: 'label-text' }, `# ${channel.name}`),
+        channel.everyone && h('span', { class: 'group-count' }, String(channel.members.length)),
+        !channel.everyone &&
         h(
           'span',
           { class: 'hover-actions' },
@@ -947,9 +1173,12 @@ function renderChannels() {
           )
         )
       )
-      const cards = isCollapsed
+      // Pinned agents first, as Orca keeps pinned workspaces on top.
+      const ordered = [...channel.members].sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)))
+      // #all lists every agent; their cards stay in their home channels so none shows twice.
+      const cards = isCollapsed || channel.everyone
         ? []
-        : channel.members.map((member) =>
+        : ordered.map((member) =>
             h(
               'button',
               {
@@ -966,7 +1195,7 @@ function renderChannels() {
               h(
                 'span',
                 { class: 'lines' },
-                h('span', { class: 'title' }, member.name),
+                h('span', { class: `title${isUnread(member) ? ' unread' : ''}` }, member.name, member.pinned && icon('pin', 'icon pin-mark')),
                 h('span', { class: 'meta' }, h('span', {}, stateText(member)), staminaBar(member), h('span', {}, `${staminaOf(member)}%`))
               )
             )
@@ -977,7 +1206,8 @@ function renderChannels() {
 }
 
 // --- Menus: one popover for right-click menus and the "+" menu, styled as Orca's context menu.
-const menu = h('div', { popover: 'auto', class: 'context-menu', role: 'menu' })
+// Manual, not light-dismiss: on macOS the right-button release lands outside the menu that the press just opened.
+const menu = h('div', { popover: 'manual', class: 'context-menu', role: 'menu' })
 document.body.append(menu)
 menu.addEventListener('keydown', (event) => {
   if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return
@@ -987,33 +1217,56 @@ menu.addEventListener('keydown', (event) => {
   items[(next + items.length) % items.length]?.focus()
 })
 
+function hideMenu() {
+  if (!menu.matches(':popover-open')) return
+  menu.hidePopover()
+  document.removeEventListener('pointerdown', dismissMenu, true)
+  document.removeEventListener('keydown', dismissMenu, true)
+  window.removeEventListener('blur', hideMenu)
+  window.removeEventListener('resize', hideMenu)
+  document.removeEventListener('scroll', hideMenu, true)
+}
+
+function dismissMenu(event) {
+  if (event.type === 'keydown' ? event.key === 'Escape' : !menu.contains(event.target)) hideMenu()
+}
+
 function showMenu(x, y, items) {
+  hideMenu()
   menu.replaceChildren(
     ...items
       .filter(Boolean)
       .map((item) =>
         item === '-'
           ? h('div', { class: 'menu-sep', role: 'separator' })
-          : h(
-              'button',
-              {
-                class: `menu-item${item.danger ? ' danger' : ''}`,
-                type: 'button',
-                role: 'menuitem',
-                disabled: item.disabled,
-                onClick: () => {
-                  menu.hidePopover()
-                  item.run()
-                }
-              },
-              item.label
-            )
+          : item.header
+            ? h('div', { class: 'menu-label' }, item.header)
+            : h(
+                'button',
+                {
+                  class: `menu-item${item.danger ? ' danger' : ''}`,
+                  type: 'button',
+                  role: 'menuitem',
+                  disabled: item.disabled,
+                  onClick: () => {
+                    hideMenu()
+                    item.run()
+                  }
+                },
+                item.icon ? icon(item.icon) : h('span', { class: 'menu-icon-space' }),
+                h('span', { class: 'menu-text' }, item.label)
+              )
       )
   )
   menu.showPopover()
   const { width, height } = menu.getBoundingClientRect()
   menu.style.left = `${Math.max(4, Math.min(x, window.innerWidth - width - 4))}px`
   menu.style.top = `${Math.max(4, Math.min(y, window.innerHeight - height - 4))}px`
+  document.addEventListener('pointerdown', dismissMenu, true)
+  document.addEventListener('keydown', dismissMenu, true)
+  window.addEventListener('blur', hideMenu)
+  window.addEventListener('resize', hideMenu)
+  document.addEventListener('scroll', hideMenu, true)
   menu.querySelector('button:not(:disabled)')?.focus()
 }
 
@@ -1021,8 +1274,8 @@ function addAgentMenu(anchor, channel) {
   if (!channel) return
   const rect = anchor.getBoundingClientRect()
   showMenu(rect.left, rect.bottom + 4, [
-    { label: t('stage.import'), run: () => void importDialog(channel) },
-    { label: t('stage.hire'), run: () => hireDialog(channel) }
+    { icon: 'download', label: t('stage.import'), run: () => void importDialog(channel) },
+    { icon: 'user-plus', label: t('stage.hire'), run: () => hireDialog(channel) }
   ])
 }
 
@@ -1034,9 +1287,9 @@ const reveal = (scope, path = '') => void api(`${scope.kind}/${scope.id}/reveal`
 /** Orca's path items: absolute, relative, and the file manager. */
 function pathItems(scope, folder, path) {
   return [
-    { label: t('menu.copyPath'), run: () => copyText(joinPath(folder, path)) },
-    path && { label: t('menu.copyRelativePath'), run: () => copyText(path) },
-    { label: t(REVEAL_KEY), run: () => reveal(scope, path) }
+    { icon: 'copy', label: t('menu.copyPath'), run: () => copyText(joinPath(folder, path)) },
+    path && { icon: 'copy', label: t('menu.copyRelativePath'), run: () => copyText(path) },
+    { icon: 'folder', label: t(REVEAL_KEY), run: () => reveal(scope, path) }
   ]
 }
 
@@ -1049,27 +1302,89 @@ function removeMemberDialog(channel, member) {
   )
 }
 
+function renameDialog(title, current, submit) {
+  showDialog(title, [field(t('menu.newName'), h('input', { name: 'name', required: true, autofocus: true, value: current }))], t('menu.renameSubmit'), (data) =>
+    submit(String(data.get('name')))
+  )
+}
+
+/** Orca's workspace menu: rename, open and copy, pin and read state, sleep, then the destructive action. */
 function agentMenu(channel, member) {
   const scope = { kind: 'members', id: member.id }
+  const unread = isUnread(member)
+  const terminalOpen = ui.terminals.includes(member.id)
   return [
-    { label: t('palette.open'), run: () => openAgent(member.id) },
+    { header: t('menu.agentSection') },
+    { icon: 'pencil', label: t('menu.rename'), run: () => renameDialog(t('menu.renameAgent'), member.name, (name) => api(`members/${member.id}/update`, { name })) },
     '-',
+    { icon: 'terminal', label: t('palette.open'), run: () => openAgent(member.id) },
     ...pathItems(scope, projectFolder(member), ''),
+    member.sessionId && { icon: 'copy', label: t('menu.copySessionId'), run: () => copyText(member.sessionId) },
     '-',
-    { label: t('studio.stop'), disabled: !ui.activity[member.id], run: () => api(`members/${member.id}/stop`, {}) },
-    { label: 'Not quite my tempo', run: () => reject(member) },
+    { icon: member.pinned ? 'pin-off' : 'pin', label: t(member.pinned ? 'menu.unpin' : 'menu.pin'), run: () => api(`members/${member.id}/update`, { pinned: !member.pinned }) },
+    { icon: unread ? 'bell-off' : 'bell', label: t(unread ? 'menu.markRead' : 'menu.markUnread'), run: () => setUnread(member, !unread) },
     '-',
-    { label: t('menu.remove'), danger: true, run: () => removeMemberDialog(channel, member) }
+    { icon: 'moon', label: t('menu.sleep'), disabled: !terminalOpen, run: () => api(`members/${member.id}/terminal/close`, {}) },
+    { icon: 'square', label: t('studio.stop'), disabled: !ui.activity[member.id], run: () => api(`members/${member.id}/stop`, {}) },
+    { icon: 'x', label: 'Not quite my tempo', run: () => reject(member) },
+    '-',
+    { icon: 'trash', label: t('menu.remove'), danger: true, run: () => removeMemberDialog(channel, member) }
   ]
 }
 
+function removeChannelDialog(channel) {
+  showDialog(
+    t('menu.deleteChannel'),
+    [h('p', { class: 'hint' }, t('menu.deleteChannelConfirm', { channel: channel.name }))],
+    t('menu.deleteSubmit'),
+    () => api(`channels/${channel.id}/remove`, {})
+  )
+}
+
 function channelMenu(channel) {
+  if (channel.everyone) {
+    return [
+      { header: t('menu.channelSection') },
+      { icon: 'pencil', label: t('menu.rename'), run: () => renameDialog(t('menu.renameChannel'), channel.name, (name) => api(`channels/${channel.id}/update`, { name })) }
+    ]
+  }
   return [
-    { label: t('stage.import'), run: () => void importDialog(channel) },
-    { label: t('stage.hire'), run: () => hireDialog(channel) },
+    { header: t('menu.channelSection') },
+    { icon: 'pencil', label: t('menu.rename'), run: () => renameDialog(t('menu.renameChannel'), channel.name, (name) => api(`channels/${channel.id}/update`, { name })) },
     '-',
-    ...pathItems({ kind: 'channels', id: channel.id }, channel.cwd, '')
+    { icon: 'download', label: t('stage.import'), run: () => void importDialog(channel) },
+    { icon: 'user-plus', label: t('stage.hire'), run: () => hireDialog(channel) },
+    '-',
+    ...pathItems({ kind: 'channels', id: channel.id }, channel.cwd, ''),
+    '-',
+    { icon: 'trash', label: t('menu.deleteChannel'), danger: true, run: () => removeChannelDialog(channel) }
   ]
+}
+
+// --- Unread, as Orca marks a workspace: a turn that ends while you look elsewhere stays unread until you look.
+const READ_KEY = 'whiplash.read'
+const readAt = readJson(READ_KEY, {})
+
+function isUnread(member) {
+  if (readAt[member.id] === undefined) readAt[member.id] = Date.now()
+  return readAt[member.id] === -1 || (member.lastTurnEndedAt ?? 0) > readAt[member.id]
+}
+
+function setUnread(member, unread) {
+  readAt[member.id] = unread ? -1 : Date.now()
+  writeStored(READ_KEY, JSON.stringify(readAt))
+  render()
+}
+
+function markSeen(members) {
+  let changed = false
+  for (const member of members) {
+    if (readAt[member.id] === -1 || (member.lastTurnEndedAt ?? 0) > (readAt[member.id] ?? 0)) {
+      readAt[member.id] = Date.now()
+      changed = true
+    }
+  }
+  if (changed) writeStored(READ_KEY, JSON.stringify(readAt))
 }
 
 // --- Tabs: the stage, opened agents, and files, diffs and commits, per channel.
@@ -1120,7 +1435,7 @@ function closeTab(channel, key) {
 }
 
 function openAgent(memberId) {
-  const channel = ui.channels.find(({ members }) => members.some(({ id }) => id === memberId))
+  const channel = ui.channels.find(({ everyone, members }) => !everyone && members.some(({ id }) => id === memberId))
   openTab(channel, { key: `agent:${memberId}`, type: 'agent', memberId })
 }
 
@@ -1141,15 +1456,19 @@ function closeOtherTabs(channel, keep) {
 }
 
 function tabMenu(channel, tab, member) {
-  if (member) return agentMenu(channel, member)
+  const others = channelTabs(channel).open.some((other) => other.key !== tab.key)
   return [
-    tab.type !== 'stage' && { label: t('menu.close'), run: () => closeTab(channel, tab.key) },
-    { label: t('menu.closeOthers'), disabled: channelTabs(channel).open.every((other) => other.key === tab.key), run: () => closeOtherTabs(channel, tab.key) },
+    member && { icon: 'pencil', label: t('menu.changeTitle'), run: () => renameDialog(t('menu.renameAgent'), member.name, (name) => api(`members/${member.id}/update`, { name })) },
+    member && '-',
+    tab.type !== 'stage' && { icon: 'x', label: t('menu.close'), run: () => closeTab(channel, tab.key) },
+    { label: t('menu.closeOthers'), disabled: !others, run: () => closeOtherTabs(channel, tab.key) },
     tab.path && '-',
-    tab.path && { label: t('menu.copyRelativePath'), run: () => copyText(tab.path) },
-    tab.path && { label: t(REVEAL_KEY), run: () => reveal(tab.scope, tab.path) },
+    tab.path && { icon: 'copy', label: t('menu.copyRelativePath'), run: () => copyText(tab.path) },
+    tab.path && { icon: 'folder', label: t(REVEAL_KEY), run: () => reveal(tab.scope, tab.path) },
     tab.type === 'commit' && '-',
-    tab.type === 'commit' && { label: t('menu.copySha'), run: () => copyText(tab.sha) }
+    tab.type === 'commit' && { icon: 'copy', label: t('menu.copySha'), run: () => copyText(tab.sha) },
+    member && '-',
+    member && { icon: 'moon', label: t('menu.sleep'), disabled: !ui.terminals.includes(member.id), run: () => api(`members/${member.id}/terminal/close`, {}) }
   ]
 }
 
@@ -1165,7 +1484,7 @@ function renderTabs(channel, active) {
       return h(
         'div',
         {
-          class: 'tab',
+          class: `tab${member && isUnread(member) ? ' unread' : ''}`,
           role: 'tab',
           tabindex: 0,
           'aria-selected': String(tab.key === active.key),
@@ -1334,7 +1653,8 @@ function renderRight(channel) {
   if (key === panelKey && !panelStale) return
   panelKey = key
   panelStale = false
-  if (panelView === 'explorer') void renderExplorer(scope, key)
+  if (scope.kind === 'channels' && channel.everyone) panel.replaceChildren(panelToolbar(''), h('div', { class: 'panel-scroll' }, note(t('panel.noFolder'))))
+  else if (panelView === 'explorer') void renderExplorer(scope, key)
   else if (panelView === 'source') void renderSource(scope, key)
   else void renderHistory(scope, key)
 }
@@ -1426,7 +1746,7 @@ async function renderExplorer(scope, key) {
           onClick: () => openFile(scope, path),
           onContextmenu: (event) => {
             event.preventDefault()
-            showMenu(event.clientX, event.clientY, [{ label: t('menu.viewFile'), run: () => openFile(scope, path) }, '-', ...pathItems(scope, folder, path)])
+            showMenu(event.clientX, event.clientY, [{ icon: 'file', label: t('menu.viewFile'), run: () => openFile(scope, path) }, '-', ...pathItems(scope, folder, path)])
           }
         },
         h('span', { class: 'spacer-icon' }),
@@ -1460,7 +1780,7 @@ async function renderExplorer(scope, key) {
               onContextmenu: (event) => {
                 event.preventDefault()
                 showMenu(event.clientX, event.clientY, [
-                  { label: t(open ? 'menu.collapse' : 'menu.expand'), run: toggleDir },
+                  { icon: 'folder', label: t(open ? 'menu.collapse' : 'menu.expand'), run: toggleDir },
                   '-',
                   ...pathItems(scope, folder, dirPath)
                 ])
@@ -1581,8 +1901,8 @@ async function renderSource(scope, key) {
               onContextmenu: (event) => {
                 event.preventDefault()
                 showMenu(event.clientX, event.clientY, [
-                  { label: t('menu.viewChanges'), run: viewChanges },
-                  { label: t('menu.viewFile'), disabled: code === 'D', run: () => openFile(scope, file.path) },
+                  { icon: 'file-diff', label: t('menu.viewChanges'), run: viewChanges },
+                  { icon: 'file', label: t('menu.viewFile'), disabled: code === 'D', run: () => openFile(scope, file.path) },
                   '-',
                   ...pathItems(scope, git.root, file.path)
                 ])
@@ -1616,7 +1936,7 @@ async function renderHistory(scope, key) {
               title: commit.subject,
               onContextmenu: (event) => {
                 event.preventDefault()
-                showMenu(event.clientX, event.clientY, [{ label: t('menu.copySha'), run: () => copyText(commit.sha) }])
+                showMenu(event.clientX, event.clientY, [{ icon: 'copy', label: t('menu.copySha'), run: () => copyText(commit.sha) }])
               },
               onClick: () =>
                 openDocument(scope, {
@@ -1853,6 +2173,11 @@ function renderSettings() {
             readStored(THEME_KEY) ?? 'system',
             setTheme
           )
+        ),
+        settingsRow(
+          t('settings.notify'),
+          t('settings.notifyBody'),
+          segmented([['sound', t('settings.notifySound')], ['silent', t('settings.notifySilent')], ['off', t('settings.notifyOff')]], notifyMode, setNotifyMode)
         )
       )
     ),
@@ -1921,8 +2246,8 @@ function render() {
   }
   const channel = currentChannel() ?? ui.channels[0]
   ui.channelId = channel?.id ?? null
-  renderChannels()
   if (!channel) {
+    renderChannels()
     disposeStudio()
     tabsRoot.replaceChildren()
     main.replaceChildren(h('div', { class: 'empty' }, h('strong', {}, 'Not quite my tempo.'), t('home.body')))
@@ -1932,8 +2257,11 @@ function render() {
     return
   }
   const tab = activeTab(channel)
-  renderTabs(channel, tab)
   const member = tab.type === 'agent' && channel.members.find(({ id }) => id === tab.memberId)
+  // Looking is reading: the stage shows every member's replies, an agent tab its own terminal.
+  if (document.visibilityState === 'visible') markSeen(member ? [member] : tab.type === 'stage' ? channel.members : [])
+  renderChannels()
+  renderTabs(channel, tab)
   if (member) {
     renderStudio(member)
   } else {
@@ -2113,6 +2441,67 @@ setInterval(() => void refreshUsage(), USAGE_REFRESH_MS)
 setInterval(renderUsage, USAGE_TICK_MS)
 window.addEventListener('hashchange', route)
 
+// --- Notifications, as Orca posts them: an agent answered, failed or needs you while you look elsewhere.
+const NOTIFY_KEY = 'whiplash.notify'
+const NOTIFY_BODY_CHARS = 180
+let notifyMode = readStored(NOTIFY_KEY) ?? 'sound'
+let notifySeen = null
+let badgeCount = -1
+
+function setNotifyMode(value) {
+  notifyMode = value
+  writeStored(NOTIFY_KEY, value)
+  if (value !== 'off' && window.Notification?.permission === 'default') void Notification.requestPermission()
+  settingsDirty = true
+  render()
+}
+
+function postNotification(title, body, open) {
+  if (notifyMode === 'off' || window.Notification?.permission !== 'granted') return
+  const notification = new Notification(title, { body: body.slice(0, NOTIFY_BODY_CHARS), silent: notifyMode === 'silent' })
+  notification.onclick = () => {
+    window.whiplashDesktop?.focus?.()
+    window.focus()
+    open()
+  }
+}
+
+/** Compares each state with the last: new replies and alerts, and agents that just started waiting on you. */
+function notifyChanges() {
+  const seen = { seq: new Map(), waiting: new Set() }
+  for (const channel of ui.channels) {
+    seen.seq.set(channel.id, channel.nextSeq)
+    const looking = document.hasFocus() && ui.view !== 'settings' && channel.id === ui.channelId
+    const since = notifySeen?.seq.get(channel.id)
+    if (since === undefined || looking) continue
+    for (const message of channel.messages.filter(({ seq }) => seq >= since)) {
+      const member = channel.members.find(({ id }) => id === (message.author.memberId ?? message.alertMemberId))
+      if (!member || !(message.author.kind === 'agent' || message.alertMemberId)) continue
+      const body = message.notice ? t(`notices.${message.notice.key}`, message.notice.params) : message.text
+      postNotification(`${member.name} · #${channel.name}`, body, () => selectChannel(channel))
+    }
+  }
+  for (const channel of ui.channels.filter(({ everyone }) => !everyone)) {
+    for (const member of channel.members.filter((candidate) => liveState(candidate) === 'waiting')) {
+      seen.waiting.add(member.id)
+      const looking = document.hasFocus() && ui.view !== 'settings' && channel.id === ui.channelId
+      if (notifySeen && !notifySeen.waiting.has(member.id) && !looking) {
+        postNotification(`${member.name} · #${channel.name}`, t('notify.waiting'), () => openAgent(member.id))
+      }
+    }
+  }
+  notifySeen = seen
+}
+
+/** The Dock badge, like Orca's: how many agents have replies you have not looked at. */
+function updateBadge() {
+  const count = ui.channels.filter(({ everyone }) => !everyone).flatMap(({ members }) => members).filter(isUnread).length
+  if (count === badgeCount) return
+  badgeCount = count
+  window.whiplashDesktop?.setBadge?.(count)
+  document.title = count ? `(${count}) Whiplash` : 'Whiplash'
+}
+
 const events = new EventSource('/api/events')
 events.addEventListener('state', (event) => {
   const next = JSON.parse(event.data)
@@ -2123,7 +2512,9 @@ events.addEventListener('state', (event) => {
   ui.queued = next.queued ?? []
   ui.terminals = next.terminals ?? []
   ui.terminalStatus = next.terminalStatus ?? {}
+  notifyChanges()
   render()
+  updateBadge()
 })
 events.addEventListener('log', (event) => {
   const { memberId, entry } = JSON.parse(event.data)

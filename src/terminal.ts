@@ -8,12 +8,15 @@ import { agentEnv } from './env.ts'
 import type { TurnResult } from './harness.ts'
 import { buildAgentPromptPasteBytes, getAgentPromptSubmitDelayMs } from './orca/agent-prompt-injection.ts'
 import { createProgramStatusOscScanner } from './orca/program-status/osc-scanner.ts'
+import { createColorQueryResponder } from './terminal-color-queries.ts'
 import { PROGRAM_STATUS_QUERY_REPLY, type ProgramStatusState } from './orca/program-status/protocol.ts'
 import type { Harness, Member } from './model.ts'
 import { findTranscript } from './sessions.ts'
 import { parseTranscriptTurn } from './transcript.ts'
 
 type Pty = {
+  cols: number
+  rows: number
   onData: (listener: (data: string) => void) => void
   onExit: (listener: (event: { exitCode: number }) => void) => void
   write: (data: string) => void
@@ -169,9 +172,14 @@ type Session = {
   /** Known to the terminal before the member records it, which waits until the transcript exists. */
   sessionId?: string
 }
-export type TerminalEvent = { type: 'data'; data: string } | { type: 'exit'; code: number }
+export type TerminalEvent = { type: 'data'; data: string; cols?: number; rows?: number } | { type: 'exit'; code: number }
 
-export function createTerminalHub(onSessionId: (memberId: string, sessionId: string) => void, onChange: () => void) {
+export function createTerminalHub(
+  onSessionId: (memberId: string, sessionId: string) => void,
+  onChange: () => void,
+  /** A turn typed straight into the terminal finished: its OSC 7501 status left 'working'. */
+  onTurnEnd: (memberId: string) => void = () => {}
+) {
   const sessions = new Map<string, Session>()
 
   function emit(session: Session, event: TerminalEvent): void {
@@ -195,7 +203,9 @@ export function createTerminalHub(onSessionId: (memberId: string, sessionId: str
     const session: Session = { pty, buffer: '', listeners: new Set(), sessionId }
     sessions.set(member.id, session)
     const scan = createProgramStatusOscScanner()
-    pty.onData((data) => {
+    const answerColorQueries = createColorQueryResponder((reply) => pty.write(reply))
+    pty.onData((raw) => {
+      const data = answerColorQueries(raw)
       session.buffer = (session.buffer + data).slice(-BUFFER_LIMIT)
       emit(session, { type: 'data', data })
       for (const event of scan(data)) {
@@ -205,6 +215,7 @@ export function createTerminalHub(onSessionId: (memberId: string, sessionId: str
         } else if (event.type === 'report' && event.report.id === null && event.report.state !== 'clear') {
           const next: TerminalStatus = { state: event.report.state, ...(event.report.kind ? { kind: event.report.kind } : {}) }
           if (next.state !== session.status?.state || next.kind !== session.status?.kind) {
+            if (session.status?.state === 'working' && next.state !== 'working') onTurnEnd(member.id)
             session.status = next
             onChange()
           }
@@ -238,11 +249,29 @@ export function createTerminalHub(onSessionId: (memberId: string, sessionId: str
     onChange()
   }
 
+  /**
+   * Orca's framing: ESC bytes inside the prompt are made inert so they cannot end the paste early,
+   * and Enter goes in its own write after the ingest-scaled settle, or Claude can leave the draft unsent.
+   */
+  async function submit(pty: Pty, prompt: string): Promise<void> {
+    const paste = buildAgentPromptPasteBytes(prompt)
+    pty.write(paste)
+    await delay(getAgentPromptSubmitDelayMs(process.platform, Buffer.byteLength(paste, 'utf8')))
+    pty.write('\r')
+  }
+
   /** Types a Stage turn into the open terminal and waits for the CLI to record the end of that turn. */
   async function typeTurn(member: Member, prompt: string, signal: AbortSignal): Promise<TurnResult> {
     const session = sessions.get(member.id)
     if (!session) {
       return { ok: false, text: '', error: 'Terminal closed' }
+    }
+    // A turn started in the terminal itself is still running. A prompt typed now would only be queued
+    // inside that turn, never recorded as its own prompt, and reported as blocked; wait for the CLI.
+    while (session.status?.state === 'working') {
+      await delay(POLL_MS)
+      if (signal.aborted) return { ok: false, text: '', error: 'Stopped' }
+      if (sessions.get(member.id) !== session) return { ok: false, text: '', error: 'Terminal closed' }
     }
     const transcriptOf = async (): Promise<string | null> => {
       const id = session.sessionId ?? member.sessionId
@@ -250,12 +279,7 @@ export function createTerminalHub(onSessionId: (memberId: string, sessionId: str
     }
     let path = await transcriptOf()
     let offset = path ? (await stat(path)).size : 0
-    // Orca's framing: ESC bytes inside the prompt are made inert so they cannot end the paste early,
-    // and Enter goes in its own write after the ingest-scaled settle, or Claude can leave the draft unsent.
-    const paste = buildAgentPromptPasteBytes(prompt)
-    session.pty.write(paste)
-    await delay(getAgentPromptSubmitDelayMs(process.platform, Buffer.byteLength(paste, 'utf8')))
-    session.pty.write('\r')
+    await submit(session.pty, prompt)
     const sentAt = Date.now()
     while (true) {
       await delay(POLL_MS)
@@ -293,6 +317,11 @@ export function createTerminalHub(onSessionId: (memberId: string, sessionId: str
   return {
     open: openTerminal,
     typeTurn,
+    /** Types more words into a turn that is already running, as the master could in the terminal itself. */
+    async inject(memberId: string, prompt: string): Promise<void> {
+      const session = sessions.get(memberId)
+      if (session) await submit(session.pty, prompt)
+    },
     isOpen: (memberId: string): boolean => sessions.has(memberId),
     statusOf: (memberId: string): TerminalStatus | undefined => sessions.get(memberId)?.status,
     statuses: (): Record<string, TerminalStatus> =>
@@ -316,7 +345,8 @@ export function createTerminalHub(onSessionId: (memberId: string, sessionId: str
       if (!session) {
         return null
       }
-      listener({ type: 'data', data: session.buffer })
+      // The replay carries the PTY size, so a viewer can lay the screen out exactly as the CLI drew it.
+      listener({ type: 'data', data: session.buffer, cols: session.pty.cols, rows: session.pty.rows })
       session.listeners.add(listener)
       return () => session.listeners.delete(listener)
     }

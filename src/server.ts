@@ -1,17 +1,21 @@
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { existsSync, statSync } from 'node:fs'
-import { readFile, stat } from 'node:fs/promises'
+import { mkdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
-import { dirname, extname, join, normalize, resolve, sep } from 'node:path'
+import { dirname, extname, isAbsolute, join, normalize, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createConductor, runShellCheck } from './conductor.ts'
 import { createWorktree, fileDiff, gitInfo, listFiles, readLog, readProjectFile, resolveInside, searchProject, showCommit } from './git.ts'
 import { claudeAccount, codexAccount } from './accounts.ts'
+import { setTerminalColors } from './terminal-color-queries.ts'
 import { runTurn, type StudioEvent } from './harness.ts'
 import {
   english,
+  ATTACHMENT_TOKEN,
   isValidMemberName,
+  type Attachment,
+  linkEveryoneChannel,
   projectFolder,
   toLocale,
   type Channel,
@@ -42,6 +46,7 @@ const VENDOR_FILES: Record<string, string> = {
 const TERMINAL_MIN = 2
 const TERMINAL_MAX = 1000
 const MAX_BODY_BYTES = 1024 * 1024
+const MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 // ponytail: Studio logs live in memory; the CLI transcript stays the durable record after a restart.
 const LOG_LIMIT = 500
 const CONTENT_TYPES: Record<string, string> = {
@@ -67,6 +72,7 @@ class HttpError extends Error {
 }
 
 const state = loadState()
+const everyone = linkEveryoneChannel(state)
 const saver = createSaver(state)
 const logs = new Map<string, (StudioEvent & { at: number })[]>()
 const streams = new Set<ServerResponse>()
@@ -93,7 +99,13 @@ const terminals = createTerminalHub((memberId, sessionId) => {
     member.sessionId = sessionId
     publishState()
   }
-}, publishState)
+}, publishState, (memberId) => {
+  const member = conductor.channelOf(memberId)?.members.find(({ id }) => id === memberId)
+  if (member) {
+    member.lastTurnEndedAt = Date.now()
+    publishState()
+  }
+})
 
 const conductor = createConductor({
   state,
@@ -103,6 +115,9 @@ const conductor = createConductor({
       ? terminals.typeTurn(member, prompt, signal)
       : runTurn(member, prompt, onEvent, signal),
   isAttached: (member) => terminals.isOpen(member.id),
+  // A turn that already ended would take the words as a new turn nobody reads back, so they wait instead.
+  canInject: (member) => terminals.statusOf(member.id)?.state === 'working',
+  inject: (member, prompt) => terminals.inject(member.id, prompt),
   runCheck: runShellCheck,
   async readSession(member) {
     const path = member.sessionId ? await findTranscript(member.harness, member.sessionId) : null
@@ -141,6 +156,15 @@ function channelById(id: string): Channel {
   return channel
 }
 
+/** #all borrows every agent but owns no folder, so hiring, importing and file views stay in the home channels. */
+function folderChannelById(id: string): Channel {
+  const channel = channelById(id)
+  if (channel.everyone) {
+    throw new HttpError(400, 'everyoneChannel')
+  }
+  return channel
+}
+
 function memberById(id: string): { channel: Channel; member: Member } {
   const channel = conductor.channelOf(id)
   const member = channel?.members.find((candidate) => candidate.id === id)
@@ -157,6 +181,22 @@ function requireText(value: unknown, field: string): string {
   return value.trim()
 }
 
+const ATTACHMENT_LIMIT = 20
+const PASTED_TEXT_LIMIT = 500_000
+
+/** Paste tokens the composer made; each must still be in the text, and stand for an image path or pasted text. */
+function requireAttachments(value: unknown, text: string): Attachment[] {
+  if (value === undefined) return []
+  if (!Array.isArray(value) || value.length > ATTACHMENT_LIMIT) throw new HttpError(400, 'badAttachment')
+  return value.map((item): Attachment => {
+    const token = item?.token
+    if (typeof token !== 'string' || !ATTACHMENT_TOKEN.test(token) || !text.includes(token)) throw new HttpError(400, 'badAttachment')
+    if (item.kind === 'image' && typeof item.path === 'string' && isAbsolute(item.path)) return { token, kind: 'image', path: item.path }
+    if (item.kind === 'text' && typeof item.text === 'string' && item.text.length <= PASTED_TEXT_LIMIT) return { token, kind: 'text', text: item.text }
+    throw new HttpError(400, 'badAttachment')
+  })
+}
+
 function requireFolder(value: unknown): string {
   const path = requireText(value, 'folder')
   if (!existsSync(path) || !statSync(path).isDirectory()) {
@@ -165,12 +205,13 @@ function requireFolder(value: unknown): string {
   return path
 }
 
-function requireMemberName(channel: Channel, value: unknown): string {
+function requireMemberName(channel: Channel, value: unknown, renaming?: string): string {
   const name = requireText(value, 'name')
   if (!isValidMemberName(name)) {
     throw new HttpError(400, 'invalidName')
   }
-  if (channel.members.some((member) => member.name.toLowerCase() === name.toLowerCase())) {
+  // Names are unique across channels, since #all puts every agent in one room.
+  if (everyone.members.some((member) => member.id !== renaming && member.name.toLowerCase() === name.toLowerCase())) {
     throw new HttpError(400, 'nameTaken')
   }
   return name
@@ -238,6 +279,32 @@ async function readJson(request: IncomingMessage): Promise<Record<string, unknow
   return raw ? (JSON.parse(raw) as Record<string, unknown>) : {}
 }
 
+/**
+ * A file dropped into a browser tab has no path on disk, so it is saved under ~/.whiplash/uploads and
+ * its path goes into the message. The custom header keeps other origins out: it forces a CORS preflight.
+ */
+async function saveUpload(request: IncomingMessage): Promise<string> {
+  if (request.headers['x-whiplash-upload'] !== '1') {
+    throw new HttpError(400, 'badUpload')
+  }
+  const raw = decodeURIComponent(String(request.headers['x-whiplash-name'] ?? 'file'))
+  const name = raw.replace(/[\\/\0]/g, '_').replace(/^\.+/, '').slice(0, 120) || 'file'
+  const chunks: Buffer[] = []
+  let size = 0
+  for await (const chunk of request) {
+    size += chunk.length
+    if (size > MAX_UPLOAD_BYTES) {
+      throw new HttpError(413, 'tooLarge')
+    }
+    chunks.push(chunk)
+  }
+  const folder = join(whiplashHome, 'uploads', randomUUID())
+  await mkdir(folder, { recursive: true })
+  const path = join(folder, name)
+  await writeFile(path, Buffer.concat(chunks))
+  return path
+}
+
 /** This server can drive agents on the machine, so pages from other origins must never reach it. */
 function isTrustedRequest(request: IncomingMessage): boolean {
   const allowed = new Set([`127.0.0.1:${PORT}`, `localhost:${PORT}`])
@@ -303,14 +370,21 @@ async function handleApi(
   }
   if (request.method === 'GET' && (parts[1] === 'channels' || parts[1] === 'members') && parts[3]) {
     // The side panels look at the folder the open tab works in: the channel's, or the agent's own.
-    const folder = parts[1] === 'channels' ? channelById(id).cwd : projectFolder(memberById(id).member)
+    const folder = parts[1] === 'channels' ? folderChannelById(id).cwd : projectFolder(memberById(id).member)
     return sendJson(response, 200, await readFolder(folder, parts[3], url.searchParams))
   }
   if (request.method !== 'POST') {
     throw new HttpError(404, 'notFound')
   }
 
+  if (route === 'POST /api/uploads') {
+    return sendJson(response, 201, { path: await saveUpload(request) })
+  }
   const body = await readJson(request)
+  if (route === 'POST /api/terminal-colors') {
+    setTerminalColors(body)
+    return sendJson(response, 200, {})
+  }
   if (route === 'POST /api/channels') {
     const channel: Channel = {
       id: randomUUID(),
@@ -327,18 +401,15 @@ async function handleApi(
     return sendJson(response, 201, { channel })
   }
   if (parts[1] === 'channels' && parts[3] === 'members') {
-    const channel = channelById(id)
+    const channel = folderChannelById(id)
     const member = await addMember(channel, body)
     channel.members.push(member)
     publishState()
     return sendJson(response, 201, { id: member.id })
   }
   if (parts[1] === 'channels' && parts[3] === 'messages') {
-    conductor.sendHumanMessage(
-      channelById(id),
-      requireText(body.text, 'message'),
-      toLocale(body.locale)
-    )
+    const text = requireText(body.text, 'message')
+    conductor.sendHumanMessage(channelById(id), text, toLocale(body.locale), requireAttachments(body.attachments, text))
     return sendJson(response, 202, {})
   }
   if (parts[1] === 'members' && parts[3] === 'reject') {
@@ -375,7 +446,7 @@ async function handleApi(
     return sendJson(response, 200, {})
   }
   if ((parts[1] === 'channels' || parts[1] === 'members') && parts[3] === 'reveal') {
-    const folder = parts[1] === 'channels' ? channelById(id).cwd : projectFolder(memberById(id).member)
+    const folder = parts[1] === 'channels' ? folderChannelById(id).cwd : projectFolder(memberById(id).member)
     const path = typeof body.path === 'string' && body.path ? body.path : ''
     const target = path
       ? await resolveInside(folder, path).catch(() => {
@@ -383,6 +454,29 @@ async function handleApi(
         })
       : folder
     revealInFileManager(target)
+    return sendJson(response, 200, {})
+  }
+  if (parts[1] === 'members' && parts[3] === 'update') {
+    const { channel, member } = memberById(id)
+    if (body.name !== undefined) member.name = requireMemberName(channel, body.name, member.id)
+    if (typeof body.pinned === 'boolean') member.pinned = body.pinned || undefined
+    publishState()
+    return sendJson(response, 200, {})
+  }
+  if (parts[1] === 'channels' && parts[3] === 'update') {
+    const channel = channelById(id)
+    if (body.name !== undefined) channel.name = requireText(body.name, 'channelName')
+    publishState()
+    return sendJson(response, 200, {})
+  }
+  if (parts[1] === 'channels' && parts[3] === 'remove') {
+    const channel = folderChannelById(id)
+    for (const member of channel.members) {
+      conductor.stop(member.id)
+      terminals.close(member.id)
+    }
+    state.channels = state.channels.filter((candidate) => candidate.id !== id)
+    publishState()
     return sendJson(response, 200, {})
   }
   if (parts[1] === 'members' && parts[3] === 'remove') {
@@ -461,6 +555,8 @@ async function serveStatic(response: ServerResponse, pathname: string): Promise<
   })
   response.writeHead(200, {
     'content-type': CONTENT_TYPES[extname(path)] ?? 'application/octet-stream',
+    // The app's files change under a running server when it is rebuilt; always revalidate them.
+    'cache-control': 'no-cache',
     // xterm positions its rows with inline styles; scripts stay limited to this origin.
     'content-security-policy':
       "default-src 'self'; style-src 'self' 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'",

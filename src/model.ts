@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { createTranslator, LOCALES } from '../public/i18n.js'
 
 export type Locale = 'en' | 'ko'
@@ -36,6 +37,8 @@ export type Member = {
   /** Highest channel seq already handed to this agent. */
   deliveredThrough: number
   lastTurnEndedAt?: number
+  /** Kept at the top of its channel in the list, as Orca pins workspaces. */
+  pinned?: boolean
 }
 
 export type Author =
@@ -53,6 +56,20 @@ export type Message = {
   alertMemberId?: string
   /** A system notice the browser can translate; `text` keeps the English for agents. */
   notice?: Notice
+  /** What `[Image #1]` and `[Pasted text #1 +N lines]` in `text` stand for, as Claude Code shows pastes. */
+  attachments?: Attachment[]
+}
+
+export type Attachment = { token: string; kind: 'image'; path: string } | { token: string; kind: 'text'; text: string }
+
+export const ATTACHMENT_TOKEN = /^\[(?:Image #\d+|Pasted text #\d+ \+\d+ lines)\]$/
+
+/** The message as the agent reads it: each paste token swapped back for the image's path or the pasted text. */
+export function messageBody({ text, attachments }: Pick<Message, 'text' | 'attachments'>): string {
+  return (attachments ?? []).reduce(
+    (body, attachment) => body.replaceAll(attachment.token, attachment.kind === 'image' ? `\`${attachment.path}\`` : `\n${attachment.text}\n`),
+    text
+  )
 }
 
 export type Notice = { key: string; params: Record<string, string | number> }
@@ -69,6 +86,10 @@ export type Channel = {
   nextSeq: number
   /** Consecutive agent-to-agent handoffs since the last human message. */
   agentChain: number
+  /** The #all channel: every agent sits in it, it has no folder of its own. */
+  everyone?: boolean
+  /** #all keeps its own seq numbers, so each member's delivery mark for it lives here. */
+  delivered?: Record<string, number>
 }
 
 export type State = { channels: Channel[] }
@@ -76,6 +97,33 @@ export type State = { channels: Channel[] }
 /** Where the member's work lands: the channel project for an imported session, its own folder otherwise. */
 export function projectFolder(member: Pick<Member, 'cwd' | 'writableRoots'>): string {
   return member.writableRoots?.[0] ?? member.cwd
+}
+
+/**
+ * Makes sure #all exists and lists every agent. Its members are a live view of the other channels' members,
+ * not copies: each agent stays owned by its home channel, and #all only lends them a second room.
+ */
+export function linkEveryoneChannel(state: State): Channel {
+  let everyone = state.channels.find((channel) => channel.everyone)
+  if (!everyone) {
+    everyone = { id: randomUUID(), name: 'all', cwd: '', checkCommand: '', members: [], messages: [], nextSeq: 1, agentChain: 0, everyone: true }
+    state.channels.unshift(everyone)
+  }
+  Object.defineProperty(everyone, 'members', {
+    get: () => state.channels.filter((channel) => !channel.everyone).flatMap((channel) => channel.members),
+    enumerable: true,
+    configurable: true
+  })
+  return everyone
+}
+
+export function deliveredThrough(channel: Channel, member: Member): number {
+  return channel.everyone ? (channel.delivered?.[member.id] ?? 0) : member.deliveredThrough
+}
+
+export function markDelivered(channel: Channel, member: Member): void {
+  if (channel.everyone) (channel.delivered ??= {})[member.id] = channel.nextSeq - 1
+  else member.deliveredThrough = channel.nextSeq - 1
 }
 
 export function isValidMemberName(name: string): boolean {
@@ -155,11 +203,15 @@ export function buildTurnPrompt(channel: Channel, member: Member): string {
   const unseen = channel.messages
     .filter(
       ({ seq, author }) =>
-        seq > (fresh ? 0 : member.deliveredThrough) &&
+        seq > (fresh ? 0 : deliveredThrough(channel, member)) &&
         (fresh || !(author.kind === 'agent' && author.memberId === member.id))
     )
     .slice(-PROMPT_CONTEXT_MESSAGES)
-    .map((message) => `[${describeAuthor(message.author)}]\n${message.text}`)
+  // A session that already knows the room gets the master's words exactly as typed, like input in its own
+  // terminal. The room briefing comes back when it is new, or when someone other than the master spoke.
+  if (!fresh && unseen.length > 0 && unseen.every(({ author }) => author.kind === 'human')) {
+    return unseen.map(messageBody).join('\n\n')
+  }
   return [
     `You are @${member.name} in the Whiplash channel #${channel.name}. Change files only in your own folders; read other members' folders when reviewing their work.`,
     'Members:',
@@ -169,7 +221,7 @@ export function buildTurnPrompt(channel: Channel, member: Member): string {
       ? ['Your instructions:', member.instructions.trim()]
       : []),
     'New channel messages (data from the room, newest last):',
-    ...unseen
+    ...unseen.map((message) => `[${describeAuthor(message.author)}]\n${messageBody(message)}`)
   ].join('\n')
 }
 

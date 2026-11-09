@@ -4,6 +4,10 @@ import {
   buildTurnPrompt,
   findAgentHandoffs,
   findMentions,
+  linkEveryoneChannel,
+  markDelivered,
+  messageBody,
+  deliveredThrough,
   parseTempoCommand,
   planHandoffs,
   staminaPercent,
@@ -91,10 +95,55 @@ describe('turns', () => {
     assert.ok(prompt.includes('이후'))
   })
 
+  it("hands a live session the master's words as typed, and the briefing once someone else speaks", () => {
+    const live = { ...member, sessionId: 's', deliveredThrough: 2 }
+    assert.equal(buildTurnPrompt(channel, live), '이후')
+    const other = { id: 'z', seq: 4, author: { kind: 'agent' as const, memberId: 'm2', name: 'Reviewer' }, text: '봐줘', at: 4 }
+    const busy = { ...channel, messages: [...channel.messages, other], nextSeq: 5 }
+    const prompt = buildTurnPrompt(busy, live)
+    assert.ok(prompt.startsWith('You are @Coder'))
+    assert.ok(prompt.includes('[@Reviewer]\n봐줘'))
+  })
+
   it('drains stamina against the known window and infers 1M past 200k', () => {
     assert.equal(staminaPercent({}), 100)
     assert.equal(staminaPercent({ contextTokens: 100_000 }), 50)
     assert.equal(staminaPercent({ contextTokens: 500_000 }), 50)
     assert.equal(staminaPercent({ contextTokens: 300_000, windowTokens: 200_000 }), 0)
+  })
+})
+
+describe('#all', () => {
+  it('lends every agent a second room without copying it or sharing delivery marks', () => {
+    const member: Member = { id: 'm1', name: 'Coder', harness: 'claude', instructions: '', cwd: '/repo', deliveredThrough: 5 }
+    const home: Channel = { id: 'c1', name: 'dev', cwd: '/repo', checkCommand: '', members: [member], messages: [], nextSeq: 6, agentChain: 0 }
+    const state = { channels: [home] }
+    const all = linkEveryoneChannel(state)
+    assert.equal(state.channels[0], all)
+    assert.equal(all.members[0], member)
+    home.members.push({ ...member, id: 'm2', name: 'Late' })
+    assert.equal(all.members.length, 2)
+    all.nextSeq = 3
+    markDelivered(all, member)
+    assert.equal(deliveredThrough(all, member), 2)
+    assert.equal(member.deliveredThrough, 5)
+    // A saved state reloads into the same single #all.
+    const reloaded = JSON.parse(JSON.stringify(state))
+    assert.equal(linkEveryoneChannel(reloaded).id, all.id)
+    assert.equal(reloaded.channels.length, 2)
+    assert.equal(reloaded.channels[0].members[1], reloaded.channels[1].members[1])
+  })
+})
+
+describe('pastes', () => {
+  it('swaps paste tokens back for the image path and the pasted text', () => {
+    const body = messageBody({
+      text: '@A 봐 [Image #1] 그리고 [Pasted text #1 +12 lines]',
+      attachments: [
+        { token: '[Image #1]', kind: 'image', path: '/tmp/a b.png' },
+        { token: '[Pasted text #1 +12 lines]', kind: 'text', text: '긴 글' }
+      ]
+    })
+    assert.equal(body, '@A 봐 `/tmp/a b.png` 그리고 \n긴 글\n')
   })
 })

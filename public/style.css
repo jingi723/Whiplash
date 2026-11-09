@@ -239,8 +239,48 @@ pre {
   font-size: 17px;
 }
 
+/* Slack's message layout: an avatar column, then who and when over the text; a hairline between turns. */
 .message {
-  padding: 7px 18px;
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr);
+  column-gap: 10px;
+  padding: 10px 18px;
+}
+
+.message + .message {
+  border-top: 1px solid var(--line);
+}
+
+.message > header,
+.message > .body {
+  grid-column: 2;
+}
+
+.avatar {
+  display: grid;
+  grid-row: span 2;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  background: var(--muted-bg);
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.avatar.human {
+  background: color-mix(in srgb, var(--brand) 22%, transparent);
+  color: var(--brand);
+}
+
+.avatar .icon,
+.avatar .provider-icon {
+  width: 18px;
+  height: 18px;
+}
+
+.message.human {
+  background: color-mix(in srgb, var(--brand) 4%, transparent);
 }
 
 .message:hover {
@@ -649,9 +689,7 @@ button.who:hover {
 
 .composer-box {
   position: relative;
-  display: flex;
-  align-items: flex-start;
-  gap: 6px;
+  display: block;
   padding: 6px 8px;
   border: 1px solid var(--line-strong);
   border-radius: 8px;
@@ -664,18 +702,24 @@ button.who:hover {
 }
 
 .composer .composer-box textarea {
-  flex: 1;
+  display: block;
   padding: 3px 2px;
   border: 0;
   background: none;
+  /* Grows with what is typed, as Orca's comment boxes do, then scrolls past a third of the window. */
+  field-sizing: content;
+  max-height: 33vh;
+  overflow-y: auto;
 }
 
 .chip {
+  position: absolute;
+  top: 9px;
+  left: 10px;
+  z-index: 1;
   display: inline-flex;
-  flex: none;
   align-items: center;
   gap: 2px;
-  margin-top: 2px;
   padding: 1px 4px 1px 8px;
   border-radius: 5px;
   background: var(--brand-soft-strong);
@@ -730,9 +774,12 @@ button.who:hover {
   }
 }
 
+/* content-box: FitAddon reads the slot's computed height as the room for rows, so it must exclude the
+   inset; with border-box it counted one row too many and clipped the CLI's input box at the bottom. */
 .terminal-slot {
   display: flex;
   flex-direction: column;
+  box-sizing: content-box;
   min-width: 0;
   min-height: 0;
   padding: 8px 0 0 10px;
@@ -740,8 +787,9 @@ button.who:hover {
   overflow: hidden;
 }
 
+/* Only as tall as its rows, so the leftover sliver shows the slot's theme background, not black. */
 .terminal-slot .xterm {
-  flex: 1;
+  flex: none;
   min-height: 0;
 }
 
@@ -1995,7 +2043,9 @@ kbd {
 }
 
 .page-toolbar strong {
+  flex: none;
   font-size: 13px;
+  white-space: nowrap;
 }
 
 .page-toolbar .ghost,
@@ -2004,18 +2054,6 @@ kbd {
   font-size: 12px;
 }
 
-.toolbar-stamina {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  color: var(--muted);
-  font-size: 11px;
-}
-
-.toolbar-stamina .stamina {
-  width: 90px;
-  height: 5px;
-}
 
 .studio-page {
   display: flex;
@@ -2503,4 +2541,195 @@ kbd {
 .empty .actions {
   justify-content: center;
   margin-top: 16px;
+}
+
+/* Orca's menu rows: a 14px muted icon column, then the label; a small section label on top. */
+.menu-item .icon,
+.menu-icon-space {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  color: var(--muted);
+}
+
+.menu-item.danger .icon {
+  color: var(--danger);
+}
+
+.menu-label {
+  padding: 6px 10px 4px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.card .title.unread {
+  font-weight: 600;
+}
+
+.card .title .pin-mark {
+  width: 11px;
+  height: 11px;
+  margin-left: 4px;
+  color: var(--muted);
+  vertical-align: -1px;
+}
+
+.tab.unread {
+  background-image: linear-gradient(rgb(245 158 11 / 10%), rgb(245 158 11 / 10%));
+}
+
+/* Drop state: the stage or terminal outlines itself while files are dragged over it. */
+.stage.dropping .composer-box,
+.terminal-slot.dropping {
+  outline: 2px dashed var(--ring);
+  outline-offset: -4px;
+}
+
+.stage.dropping .composer-box::before {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  background: color-mix(in srgb, var(--raised) 90%, transparent);
+  color: var(--muted);
+  font-size: 13px;
+  content: attr(data-drop-hint);
+}
+
+/* Slack's typing line above the composer; empty, it takes no room. */
+.typing {
+  display: grid;
+  gap: 2px;
+  padding: 0 20px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.typing:not(:empty) {
+  padding-top: 6px;
+}
+
+.typing-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 18px;
+}
+
+.typing-row.waiting {
+  color: var(--waiting);
+}
+
+.typing-name {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text);
+  font-weight: 600;
+}
+
+.typing-name:hover {
+  text-decoration: underline;
+}
+
+.dots {
+  display: inline-flex;
+  gap: 3px;
+  margin-left: 4px;
+}
+
+.dots i {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: typing-bounce 1.2s ease-in-out infinite;
+}
+
+.dots i:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.dots i:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+@keyframes typing-bounce {
+  0%,
+  60%,
+  100% {
+    opacity: 0.35;
+    transform: translateY(0);
+  }
+  30% {
+    opacity: 1;
+    transform: translateY(-4px);
+  }
+}
+
+.group-header .group-count {
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* A waiting CLI's question, mirrored above the composer with its answers as buttons. */
+.prompt-card {
+  display: grid;
+  gap: 6px;
+  margin: 4px 0;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--waiting) 45%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--waiting) 6%, var(--editor));
+}
+
+.prompt-screen {
+  margin: 0;
+  max-height: 40vh;
+  overflow: auto;
+  color: var(--text);
+  font: 11px/1.45 var(--mono);
+  /* The CLI already wrapped these rows to its width; wrapping them again would break every line twice. */
+  white-space: pre;
+}
+
+.prompt-menu {
+  display: grid;
+  gap: 4px;
+  justify-items: start;
+}
+
+.prompt-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.prompt-menu button,
+.prompt-actions button {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* A paste token in a message, as Claude Code shows [Image #1]; hover shows the path or the start of the text. */
+.paste-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 6px;
+  border-radius: 5px;
+  background: var(--muted-bg);
+  color: var(--text);
+  font-size: 0.92em;
+  vertical-align: baseline;
+}
+
+.paste-chip .icon {
+  width: 12px;
+  height: 12px;
 }
