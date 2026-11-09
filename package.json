@@ -45,7 +45,8 @@
       "!src/orca/vitest.ts",
       "public/**",
       "!public/**/*.test.js",
-      "package.json"
+      "package.json",
+      "!node_modules/agent-browser/bin/agent-browser-{linux,win32}*"
     ],
     "asar": false,
     "npmRebuild": false,
