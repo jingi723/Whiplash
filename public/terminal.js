@@ -5,6 +5,7 @@ import { activateOrcaTerminalUnicodeProvider } from './orca/terminal-unicode-pro
 import { buildDefaultTerminalOptions } from './orca/terminal-options.js'
 import { buildFontFamily } from './orca/monospace-font-family.js'
 import { DEFAULT_TERMINAL_THEMES } from './orca/terminal-theme-defaults.js'
+import { isShiftEnter, TERMINAL_SHIFT_ENTER_INPUT } from './orca/terminal-shift-enter.js'
 
 const RESIZE_DELAY_MS = 120
 const FALLBACK_THEMES = { dark: 'Ghostty Default Style Dark', light: 'Builtin Tango Light' }
@@ -125,6 +126,13 @@ export function mountTerminal(container, memberId, onExit) {
     onExit()
   })
   const input = terminal.onData((data) => void post(`members/${memberId}/terminal/input`, { data }))
+  // xterm sends a plain CR for Shift+Enter, which submits; send ESC CR so the CLI inserts a newline, as Orca does.
+  terminal.attachCustomKeyEventHandler((event) => {
+    if (!isShiftEnter(event)) return true
+    event.preventDefault()
+    if (event.type === 'keydown') terminal.input(TERMINAL_SHIFT_ENTER_INPUT, true)
+    return false
+  })
 
   let resizeTimer = null
   const observer = new ResizeObserver(() => {
