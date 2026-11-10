@@ -252,7 +252,8 @@ export function createConductor(deps: ConductorDeps) {
     }
     if (command !== 'clear' && command !== 'model') {
       const session = await deps.readSession(member)
-      member.contextTokens = session?.contextTokens ?? member.contextTokens
+      // After a compact the transcript has no usage yet, which means the old count is gone.
+      if (session) member.contextTokens = session.contextTokens
     }
     if (!own) return
     if (command === 'model') {

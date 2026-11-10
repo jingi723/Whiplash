@@ -31,6 +31,12 @@ describe('parseTranscriptTurn', () => {
     assert.deepEqual(turn, { text: 'done', contextTokens: 110 })
   })
 
+  it('forgets the old context size at a compact boundary', () => {
+    const usage = { type: 'assistant', message: { content: [], usage: { input_tokens: 198_000 } } }
+    const boundary = { type: 'system', subtype: 'compact_boundary' }
+    assert.equal(parseTranscriptTurn(lines(usage, boundary)).contextTokens, undefined)
+  })
+
   it('reports no reply until the current turn has one', () => {
     const previous = { type: 'assistant', message: { content: [{ type: 'text', text: 'old' }] } }
     const prompt = { type: 'user', message: { content: 'next' } }

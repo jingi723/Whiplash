@@ -6,6 +6,7 @@ const TAIL_BYTES = 8 * 1024 * 1024
 
 type TranscriptLine = {
   type?: string
+  subtype?: string
   isSidechain?: boolean
   message?: {
     content?: unknown
@@ -47,7 +48,10 @@ export function parseTranscriptTurn(jsonl: string): TurnRead {
     } catch {
       continue
     }
-    if (parsed.type === 'user' && !parsed.isSidechain && isHumanPrompt(parsed.message?.content)) {
+    if (parsed.type === 'system' && parsed.subtype === 'compact_boundary') {
+      // Usage before the boundary belongs to the old, longer conversation.
+      turn.contextTokens = undefined
+    } else if (parsed.type === 'user' && !parsed.isSidechain && isHumanPrompt(parsed.message?.content)) {
       turn.text = ''
     } else if (parsed.type === 'assistant' && !parsed.isSidechain) {
       turn.text = assistantText(parsed.message?.content) || turn.text

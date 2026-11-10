@@ -1166,7 +1166,7 @@ function statusDot(member) {
 
 function stateText(member) {
   const state = liveState(member)
-  if (state === 'working' || state === 'checking' || state === 'waiting') return t(`activity.${state}`)
+  if (state === 'checking' || state === 'waiting') return t(`activity.${state}`)
   // An idle agent shows what it runs on, as the terminal's status line does.
   const { label, effort } = modelOf(member, modelLists)
   return [label, effort].filter(Boolean).join(' · ') || member.harness
