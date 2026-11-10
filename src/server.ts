@@ -426,7 +426,12 @@ async function handleApi(
   const body = await readJson(request)
   if (parts[1] === 'members' && parts[3] === 'browser') {
     memberById(id)
-    if (parts[4] === 'ensure') return sendJson(response, 200, { port: await ensureBrowser(id).catch(browserError) })
+    if (parts[4] === 'ensure') {
+      const port = await ensureBrowser(id).catch(browserError)
+      // An agent's own use, not a viewer reconnecting: the page adds the browser tab so the master can watch.
+      if (body.agent) broadcast('browserUsed', { memberId: id })
+      return sendJson(response, 200, { port })
+    }
     if (parts[4] === 'close') {
       await closeBrowser(id)
       return sendJson(response, 200, {})

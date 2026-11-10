@@ -116,7 +116,7 @@ export function writeBrowserWrapper(): void {
 if [ -z "$WHIPLASH_MEMBER_ID" ] || [ -z "$WHIPLASH_URL" ]; then
   echo "agent-browser: run this from a Whiplash agent" >&2; exit 1
 fi
-reply=$(curl -sS -X POST -H 'content-type: application/json' -H "origin: $WHIPLASH_URL" -d '{}' \\
+reply=$(curl -sS -X POST -H 'content-type: application/json' -H "origin: $WHIPLASH_URL" -d '{"agent":true}' \\
   "$WHIPLASH_URL/api/members/$WHIPLASH_MEMBER_ID/browser/ensure" 2>&1)
 port=$(printf '%s' "$reply" | sed -n 's/.*"port":\\([0-9]*\\).*/\\1/p')
 if [ -z "$port" ]; then

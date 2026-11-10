@@ -1531,6 +1531,24 @@ function openAgent(memberId) {
   openTab(channel, { key: `agent:${memberId}`, type: 'agent', memberId })
 }
 
+// Orca adds an agent's browser tab without taking focus. Once per turn, so a tab the master closes stays closed.
+const browserShown = new Set()
+function showAgentBrowser(memberId) {
+  if (browserShown.has(memberId)) return
+  browserShown.add(memberId)
+  const here = currentChannel()
+  const channel = here?.members.some(({ id }) => id === memberId)
+    ? here
+    : ui.channels.find(({ everyone, members }) => !everyone && members.some(({ id }) => id === memberId))
+  if (!channel) return
+  const entry = channelTabs(channel)
+  const key = `browser:${memberId}`
+  if (entry.open.some((tab) => tab.key === key)) return
+  entry.open.push({ key, type: 'browser', memberId })
+  saveTabs()
+  render()
+}
+
 function openBrowser(memberId) {
   const channel = ui.channels.find(({ everyone, members }) => !everyone && members.some(({ id }) => id === memberId))
   // Asking again reconnects, so a browser closed while its tab was open comes back.
@@ -2728,6 +2746,7 @@ function updateBadge() {
 const events = new EventSource('/api/events')
 events.addEventListener('state', (event) => {
   const next = JSON.parse(event.data)
+  for (const id of browserShown) if (!next.activity[id]) browserShown.delete(id)
   // A finished turn may have changed files and commits; the side panel reloads on its next render.
   if (Object.keys(ui.activity).some((id) => !next.activity[id])) panelStale = true
   ui.channels = next.channels
@@ -2740,6 +2759,7 @@ events.addEventListener('state', (event) => {
   render()
   updateBadge()
 })
+events.addEventListener('browserUsed', (event) => showAgentBrowser(JSON.parse(event.data).memberId))
 events.addEventListener('log', (event) => {
   const { memberId, entry } = JSON.parse(event.data)
   if (studio?.memberId === memberId) studio.log.push(entry)
