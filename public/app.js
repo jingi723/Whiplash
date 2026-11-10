@@ -2421,49 +2421,137 @@ function showDialog(title, fields, submitLabel, onSubmit) {
   )
   dialog.replaceChildren(form)
   dialog.showModal()
+  // A step swapped into an already open dialog gets no autofocus of its own.
+  form.querySelector('[autofocus]')?.focus()
 }
 
 function field(label, control) {
   return h('label', { class: 'field' }, label, control)
 }
 
-async function channelDialog() {
-  const { sessions } = await api('sessions')
-  const folders = h('datalist', { id: 'folders' }, [...new Set(sessions.map(({ cwd }) => cwd))].map((cwd) => h('option', { value: cwd })))
-  const name = h('input', { name: 'name', required: true, autofocus: true, placeholder: 'general', onInput: () => create.checked && suggest() })
-  const cwd = h('input', { name: 'cwd', required: true, list: 'folders', placeholder: '/Users/you/projects/app' })
-  // A new project lands next to the others under ~/projects, named after the channel; the path stays editable.
-  const suggest = () => (cwd.value = `~/projects/${name.value.trim().replace(/[\\/:]+/g, '-')}`)
-  const create = h('input', { type: 'checkbox', name: 'create', onChange: () => (create.checked ? suggest() : (cwd.value = '')) })
+// Orca's "Add a project" flow: pick a folder, or create a new project, then name the channel.
+const PROJECTS_PARENT = '~/projects'
+
+function channelDialog() {
   const pickFolder = window.whiplashDesktop?.pickFolder
-  const browse =
-    pickFolder &&
-    h('button', { class: 'ghost', type: 'button', onClick: async () => {
-      const path = await pickFolder()
-      if (path) {
-        cwd.value = path
-        create.checked = false
-      }
-    } }, t('channel.browse'))
+  const browse = async () => {
+    // Without the desktop window there is no Finder, so the next step takes a typed path.
+    const path = pickFolder ? await pickFolder() : ''
+    if (path !== null) void channelFolderStep(path)
+  }
+  const action = (name, title, description, onClick, extra = '') =>
+    h(
+      'button',
+      { type: 'button', class: `start-action ${extra}`, 'data-start-action': true, onClick },
+      h('span', { class: 'start-icon' }, icon(name)),
+      h('span', { class: 'start-text' }, h('span', { class: 'start-title' }, title), h('span', { class: 'start-desc' }, description))
+    )
+  const primary = action('folder-open', t('channel.browse'), t('channel.browseHint'), browse, 'primary')
+  // Arrow keys move between the actions, as in Orca.
+  const arrows = (event) => {
+    if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return
+    const buttons = [...dialog.querySelectorAll('[data-start-action]')]
+    const next = buttons.indexOf(document.activeElement) + (event.key === 'ArrowDown' ? 1 : -1)
+    event.preventDefault()
+    buttons[(next + buttons.length) % buttons.length]?.focus()
+  }
+  dialog.replaceChildren(
+    h(
+      'div',
+      { class: 'start-steps', onKeyDown: arrows },
+      h('h2', {}, t('channel.title')),
+      primary,
+      h('p', { class: 'section-label' }, t('channel.otherWays')),
+      h('div', { class: 'start-list' }, action('plus', t('channel.new'), t('channel.newHint'), channelCreateStep))
+    )
+  )
+  dialog.showModal()
+  primary.focus()
+}
+
+const backButton = () => h('button', { class: 'back', type: 'button', onClick: channelDialog }, icon('arrow-left'), t('channel.back'))
+
+const checkFields = () => [
+  field(t('channel.check'), h('input', { name: 'checkCommand', placeholder: 'pnpm build' })),
+  h('p', { class: 'hint' }, t('channel.checkHint'))
+]
+
+async function submitChannel(body) {
+  const { channel } = await api('channels', body)
+  // The response can beat the event stream, and the room's buttons must not keep pointing at the old channel.
+  if (!ui.channels.some(({ id }) => id === channel.id)) ui.channels.push(channel)
+  ui.channelId = channel.id
+  location.hash = '#/'
+  render()
+}
+
+async function channelFolderStep(path) {
+  const { sessions } = path ? { sessions: [] } : await api('sessions')
+  const folders = h('datalist', { id: 'folders' }, [...new Set(sessions.map(({ cwd }) => cwd))].map((cwd) => h('option', { value: cwd })))
+  const cwd = path
+    ? h('input', { name: 'cwd', value: path, readonly: true, class: 'mono' })
+    : h('input', { name: 'cwd', required: true, list: 'folders', class: 'mono', placeholder: '/Users/you/projects/app' })
   showDialog(
     t('channel.title'),
     [
-      field(t('channel.name'), name),
-      field(t('channel.folder'), h('span', { class: 'folder-row' }, cwd, browse)),
+      backButton(),
+      field(t('channel.name'), h('input', { name: 'name', required: true, autofocus: true, value: path ? folderName(path) : '', placeholder: 'general' })),
+      field(t('channel.folder'), cwd),
       folders,
-      h('label', { class: 'check' }, create, t('channel.create')),
-      field(t('channel.check'), h('input', { name: 'checkCommand', placeholder: 'pnpm build' })),
-      h('p', { class: 'hint' }, t('channel.checkHint'))
+      ...checkFields()
     ],
     t('channel.submit'),
-    async (data) => {
-      const { channel } = await api('channels', { ...Object.fromEntries(data), create: data.has('create') })
-      // The response can beat the event stream, and the room's buttons must not keep pointing at the old channel.
-      if (!ui.channels.some(({ id }) => id === channel.id)) ui.channels.push(channel)
-      ui.channelId = channel.id
-      location.hash = '#/'
-      render()
-    }
+    (data) => submitChannel(Object.fromEntries(data))
+  )
+}
+
+// Orca's create step: a name, and a card showing where the new Git repository will go.
+function channelCreateStep() {
+  const pickFolder = window.whiplashDesktop?.pickFolder
+  const name = h('input', { name: 'name', required: true, autofocus: true, autocomplete: 'off', spellcheck: 'false', class: 'mono', placeholder: 'my-project', onInput: () => update() })
+  const parent = h('input', { class: 'mono', value: PROJECTS_PARENT, spellcheck: 'false', onInput: () => update() })
+  const summary = h('span', { class: 'start-title' })
+  const preview = h('span', { class: 'start-desc mono' })
+  const target = () => `${parent.value.trim().replace(/[\\/]+$/, '')}/${name.value.trim().replace(/[\\/:]+/g, '-') || 'my-project'}`
+  const update = () => {
+    summary.textContent = t('channel.repoIn', { parent: parent.value.trim() || '—' })
+    preview.textContent = target()
+  }
+  const place = h(
+    'div',
+    { class: 'location', hidden: true },
+    field(
+      t('channel.location'),
+      h(
+        'span',
+        { class: 'folder-row' },
+        parent,
+        pickFolder &&
+          h('button', { class: 'ghost', type: 'button', title: t('channel.changeParent'), onClick: async () => {
+            const path = await pickFolder()
+            if (path) {
+              parent.value = path
+              update()
+            }
+          } }, icon('folder-open'))
+      )
+    )
+  )
+  const card = h(
+    'div',
+    { class: 'location-card' },
+    h('button', { type: 'button', class: 'location-toggle', 'aria-expanded': 'false', onClick: (event) => {
+      place.hidden = !place.hidden
+      event.currentTarget.setAttribute('aria-expanded', String(!place.hidden))
+    } }, h('span', { class: 'start-icon' }, icon('git-branch')), h('span', { class: 'start-text' }, summary, preview), icon('chevron-down', 'icon chev')),
+    place
+  )
+  update()
+  showDialog(
+    t('channel.newTitle'),
+    [backButton(), h('p', { class: 'hint' }, t('channel.newDescription')), field(t('channel.name'), name), card, ...checkFields()],
+    t('channel.createProject'),
+    (data) => submitChannel({ name: data.get('name'), checkCommand: data.get('checkCommand'), cwd: target(), create: true })
   )
 }
 

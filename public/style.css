@@ -430,6 +430,140 @@ button.who:hover {
   resize: none;
 }
 
+/* Orca's "Add a project" start step and create card. */
+.start-steps {
+  display: grid;
+  gap: 12px;
+  padding: 18px;
+}
+
+.start-steps h2 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.start-action,
+.location-toggle {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  width: 100%;
+  padding: 10px 12px;
+  border: 0;
+  background: none;
+  color: var(--text);
+  text-align: left;
+}
+
+.start-action.primary {
+  min-height: 60px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.start-action:focus-visible,
+.start-action.primary:focus {
+  outline: none;
+  border-color: var(--brand);
+  background: rgb(127 127 127 / 12%);
+}
+
+.start-list {
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.start-list .start-action + .start-action {
+  border-top: 1px solid var(--line);
+}
+
+.start-list .start-action:hover,
+.location-toggle:hover {
+  background: rgb(127 127 127 / 10%);
+}
+
+.start-icon {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--muted);
+}
+
+.start-text {
+  display: grid;
+  flex: 1;
+  min-width: 0;
+  gap: 2px;
+}
+
+.start-title {
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.start-desc {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.section-label {
+  margin: 4px 0 -6px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.location-card {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.location-toggle[aria-expanded='true'] .chev {
+  transform: rotate(180deg);
+}
+
+.location {
+  padding: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.dialog form .back {
+  order: -1;
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+  justify-self: start;
+  margin: -4px 0 -6px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.dialog form .back:hover {
+  color: var(--text);
+}
+
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
 .folder-row {
   display: flex;
   gap: 8px;
