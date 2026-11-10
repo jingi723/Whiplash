@@ -7,6 +7,7 @@ import { formatRateLimitWindowChipLabel, formatWindowLabel } from './orca/rate-l
 import { barColor, clampUsedPercent } from './orca/usage-bar.js'
 import { icon, providerIcon } from './icons.js'
 import { mountBrowser } from './browser-view.js'
+import { mountFloatingPanel } from './orca/floating-panel.js'
 
 // In the desktop app the macOS window controls float over the rail, as in Orca.
 if (window.whiplashDesktop?.platform === 'darwin') document.documentElement.classList.add('desktop-mac')
@@ -305,7 +306,7 @@ function togglePanel(side) {
   panels[side] = !panels[side]
   savePanels()
   applyPanels()
-  if (side === 'right') render()
+  if (side === 'right' && panels.right) render()
 }
 
 for (const handle of document.querySelectorAll('.resizer')) {
@@ -344,6 +345,11 @@ window.addEventListener(
   'keydown',
   (event) => {
     const mod = isMac ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey
+    // Orca's floating workspace toggle; event.code, since Option changes the key on a Mac.
+    if (mod && event.altKey && !event.shiftKey && event.code === 'KeyA') {
+      event.preventDefault()
+      return floating.open ? floating.setOpen(false) : openFloatingBrowser()
+    }
     const action = mod && !event.shiftKey && !event.altKey && SHORTCUTS[event.key.toLowerCase()]
     if (!action) return
     event.preventDefault()
@@ -1395,6 +1401,7 @@ function agentMenu(channel, member) {
     member.sessionId && { icon: 'copy', label: t('menu.copySessionId'), run: () => copyText(member.sessionId) },
     '-',
     { icon: 'globe', label: t('menu.viewBrowser'), run: () => openBrowser(member.id) },
+    { icon: 'picture-in-picture', label: t('menu.floatBrowser'), run: () => openFloatingBrowser(member.id) },
     { icon: 'x', label: t('menu.closeBrowser'), run: () => api(`members/${member.id}/browser/close`, {}) },
     '-',
     { icon: member.pinned ? 'pin-off' : 'pin', label: t(member.pinned ? 'menu.unpin' : 'menu.pin'), run: () => api(`members/${member.id}/update`, { pinned: !member.pinned }) },
@@ -1531,18 +1538,13 @@ function openAgent(memberId) {
   openTab(channel, { key: `agent:${memberId}`, type: 'agent', memberId })
 }
 
-// Like Aside, an agent's browser shows in the right panel while you chat. Once per turn,
-// so a master who switches away is not pulled back; the center tab never changes.
+// An agent's browser pops up in the floating window while you chat. Once per turn,
+// so a master who closes it is not pulled back; the center tab and right panel never change.
 const browserShown = new Set()
-let panelBrowserMember = null
 function showAgentBrowser(memberId) {
   if (browserShown.has(memberId)) return
   browserShown.add(memberId)
-  panelBrowserMember = memberId
-  panelView = 'browser'
-  writeStored(PANEL_VIEW_KEY, panelView)
-  if (!panels.right) togglePanel('right')
-  else render()
+  openFloatingBrowser(memberId)
 }
 
 function openBrowser(memberId) {
@@ -1648,41 +1650,82 @@ function renderBrowser(tab) {
   if (main.firstChild !== browserView.node) main.replaceChildren(browserView.node)
 }
 
-// The right panel's own view, apart from the center tab's.
-let panelBrowser = null
+// --- Floating browser: Orca's floating workspace holding one agent's live browser (public/orca/floating-panel.js).
+const FLOAT_MEMBER_KEY = 'whiplash.floatBrowser'
+const floating = mountFloatingPanel({ h, storageKey: 'whiplash.floatingPanel' })
+document.body.append(floating.node)
+// Double-clicking the titlebar maximizes too; swap the button's icon to match.
+floating.bar.addEventListener('dblclick', () => renderFloating())
+let floatMember = readStored(FLOAT_MEMBER_KEY)
+let floatBrowser = null
+let floatBarKey = ''
 
-function disposePanelBrowser() {
-  panelBrowser?.dispose()
-  panelBrowser = null
+function openFloatingBrowser(memberId = floatMember) {
+  if (memberId) {
+    floatMember = memberId
+    writeStored(FLOAT_MEMBER_KEY, memberId)
+  }
+  floating.setOpen(true)
+  renderFloating()
 }
 
-function renderPanelBrowser() {
+function disposeFloatBrowser() {
+  floatBrowser?.dispose()
+  floatBrowser = null
+}
+
+/** Minimizing hides the window but keeps the stream; closing ends it. */
+function closeFloating(minimize) {
+  if (!minimize) {
+    disposeFloatBrowser()
+    floating.body.replaceChildren()
+  }
+  floating.setOpen(false)
+}
+
+function renderFloating() {
+  if (!floating.open) return
   const agents = ui.channels.filter(({ everyone }) => !everyone).flatMap(({ members }) => members)
-  const member = agents.find(({ id }) => id === panelBrowserMember)
-  const picker = h(
-    'select',
-    {
-      class: 'browser-tabs',
-      'aria-label': t('panel.browserAgent'),
-      onChange: (event) => {
-        panelBrowserMember = event.target.value
-        render()
-      }
-    },
-    ...(member ? [] : [h('option', { value: '', selected: true, disabled: true }, t('panel.browserPick'))]),
-    ...agents.map(({ id, name }) => h('option', { value: id, selected: id === panelBrowserMember }, name))
-  )
-  const toolbar = h('div', { class: 'panel-toolbar' }, h('span', { class: 'title' }, t('panel.browser')), picker)
+  const member = agents.find(({ id }) => id === floatMember)
+  // Rebuilt only when the agents change, so an open picker survives the state ticks.
+  const barKey = JSON.stringify([floatMember, floating.maximized, locale, agents.map(({ id, name }) => [id, name])])
+  if (barKey !== floatBarKey) {
+    floatBarKey = barKey
+    const button = (name, label, run) => h('button', { class: 'icon-xs', type: 'button', title: label, 'aria-label': label, onClick: run }, icon(name))
+    const picker = h(
+      'select',
+      {
+        class: 'browser-tabs',
+        'aria-label': t('float.agent'),
+        onChange: (event) => openFloatingBrowser(event.target.value)
+      },
+      ...(member ? [] : [h('option', { value: '', selected: true, disabled: true }, t('float.pick'))]),
+      ...agents.map(({ id, name }) => h('option', { value: id, selected: id === floatMember }, name))
+    )
+    const maximized = floating.maximized
+    floating.bar.replaceChildren(
+      icon('globe'),
+      h('span', { class: 'title' }, t('float.title')),
+      picker,
+      h('span', { class: 'spacer' }),
+      button('minus', t('float.minimize'), () => closeFloating(true)),
+      button(maximized ? 'minimize-2' : 'maximize-2', t(maximized ? 'float.restore' : 'float.maximize'), () => {
+        floating.toggleMaximized()
+        renderFloating()
+      }),
+      button('x', t('float.close'), () => closeFloating(false))
+    )
+  }
   if (!member) {
-    disposePanelBrowser()
-    panel.replaceChildren(toolbar, h('div', { class: 'panel-scroll' }, note(t('panel.noBrowser'))))
+    disposeFloatBrowser()
+    floating.body.replaceChildren(note(t('float.empty')))
     return
   }
-  if (panelBrowser?.memberId !== member.id) {
-    disposePanelBrowser()
-    panelBrowser = { memberId: member.id, ...mountBrowser(member.id, { h, t, api }) }
+  if (floatBrowser?.memberId !== member.id) {
+    disposeFloatBrowser()
+    floatBrowser = { memberId: member.id, ...mountBrowser(member.id, { h, t, api }) }
   }
-  if (panel.lastChild !== panelBrowser.node) panel.replaceChildren(toolbar, panelBrowser.node)
+  if (floating.body.firstChild !== floatBrowser.node) floating.body.replaceChildren(floatBrowser.node)
 }
 
 // --- Documents: read-only views of files, diffs and commits, kept while their tab stays open.
@@ -1775,8 +1818,7 @@ const PANEL_VIEW_KEY = 'whiplash.panelView'
 const PANEL_VIEWS = [
   ['explorer', 'files', 'panel.explorer'],
   ['source', 'git-branch', 'panel.source'],
-  ['history', 'history', 'panel.history'],
-  ['browser', 'globe', 'panel.browser']
+  ['history', 'history', 'panel.history']
 ]
 let panelView = PANEL_VIEWS.some(([view]) => view === readStored(PANEL_VIEW_KEY)) ? readStored(PANEL_VIEW_KEY) : 'explorer'
 let panelKey = ''
@@ -1814,12 +1856,7 @@ function renderActivity() {
 
 function renderRight(channel) {
   renderActivity()
-  if (!panels.right || panelView !== 'browser') disposePanelBrowser()
   if (!panels.right) return
-  if (panelView === 'browser') {
-    panelKey = 'browser'
-    return renderPanelBrowser()
-  }
   const scope = scopeOf(channel, activeTab(channel))
   const key = `${panelView}|${scopeKeyOf(scope)}`
   if (key === panelKey && !panelStale) return
@@ -2417,13 +2454,13 @@ function render() {
     return
   }
   if (!modelLists) loadModels(render)
+  renderFloating()
   const channel = currentChannel() ?? ui.channels[0]
   ui.channelId = channel?.id ?? null
   if (!channel) {
     renderChannels()
     disposeStudio()
     disposeBrowser()
-    disposePanelBrowser()
     tabsRoot.replaceChildren()
     main.replaceChildren(h('div', { class: 'empty' }, h('strong', {}, 'Not quite my tempo.'), t('home.body')))
     renderActivity()

@@ -2962,6 +2962,133 @@ kbd {
   cursor: pointer;
 }
 
-.panel .browser-tabs {
-  max-width: 80px;
+/* Floating browser: Orca's floating workspace, above the app but below menus and dialogs. */
+.floating-panel {
+  position: fixed;
+  z-index: 45;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--card);
+  box-shadow: 0 4px 12px rgb(0 0 0 / 16%), 0 24px 64px rgb(0 0 0 / 32%);
+}
+
+.floating-panel[hidden] {
+  display: none;
+}
+
+.floating-titlebar {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+  height: 36px;
+  padding: 0 6px 0 10px;
+  border-bottom: 1px solid var(--line);
+  cursor: grab;
+  user-select: none;
+}
+
+.floating-titlebar:active {
+  cursor: grabbing;
+}
+
+.floating-panel.maximized .floating-titlebar {
+  cursor: default;
+}
+
+.floating-titlebar > .icon {
+  width: 14px;
+  height: 14px;
+  color: var(--muted);
+}
+
+.floating-titlebar .title {
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.floating-titlebar .spacer {
+  flex: 1;
+}
+
+.floating-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.floating-resize {
+  position: absolute;
+  z-index: 1;
+}
+
+.floating-panel.maximized .floating-resize {
+  display: none;
+}
+
+.floating-resize.n,
+.floating-resize.s {
+  right: 8px;
+  left: 8px;
+  height: 8px;
+  cursor: ns-resize;
+}
+
+.floating-resize.w,
+.floating-resize.e {
+  top: 8px;
+  bottom: 8px;
+  width: 8px;
+  cursor: ew-resize;
+}
+
+.floating-resize.n {
+  top: 0;
+}
+
+.floating-resize.s {
+  bottom: 0;
+}
+
+.floating-resize.w {
+  left: 0;
+}
+
+.floating-resize.e {
+  right: 0;
+}
+
+.floating-resize.nw,
+.floating-resize.ne,
+.floating-resize.sw,
+.floating-resize.se {
+  width: 12px;
+  height: 12px;
+}
+
+.floating-resize.nw {
+  top: 0;
+  left: 0;
+  cursor: nwse-resize;
+}
+
+.floating-resize.se {
+  right: 0;
+  bottom: 0;
+  cursor: nwse-resize;
+}
+
+.floating-resize.ne {
+  top: 0;
+  right: 0;
+  cursor: nesw-resize;
+}
+
+.floating-resize.sw {
+  bottom: 0;
+  left: 0;
+  cursor: nesw-resize;
 }
