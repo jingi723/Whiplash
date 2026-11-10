@@ -1047,18 +1047,6 @@ function promptCard(member) {
 }
 
 // Why the shell stays mounted: moving the textarea in the DOM would cancel a Hangul syllable mid-composition.
-/** Who runs on what; a click opens the composer's /model picker for that member. */
-function modelChip(member, composer) {
-  const { label, effort } = modelOf(member, modelLists)
-  const text = [label, effort].filter(Boolean).join(' · ')
-  return h(
-    'button',
-    { class: 'model-chip', type: 'button', title: t('composer.command.model'), onClick: () => composer.pickModel(member.name) },
-    h('span', { class: 'model-chip-name' }, member.name),
-    text || '…'
-  )
-}
-
 function renderStage(channel) {
   if (shell?.channelId !== channel.id) {
     shell = createShell(channel.id)
@@ -1073,10 +1061,8 @@ function renderStage(channel) {
     channel.everyone
       ? h('span', { class: 'path' }, t('stage.everyone', { count: channel.members.length }))
       : h('span', { class: 'path', title: channel.cwd }, channel.cwd),
-    channel.checkCommand && h('span', { class: 'tag', title: t('stage.checkTitle') }, t('stage.check', { command: channel.checkCommand })),
-    h('span', { class: 'model-chips' }, ...channel.members.map((member) => modelChip(member, composer)))
+    channel.checkCommand && h('span', { class: 'tag', title: t('stage.checkTitle') }, t('stage.check', { command: channel.checkCommand }))
   )
-  if (!modelLists) loadModels(render)
   list.setAttribute('aria-label', t('stage.log', { channel: channel.name }))
   renderMessages(channel)
   renderTyping(channel, typing)
@@ -1181,7 +1167,9 @@ function statusDot(member) {
 function stateText(member) {
   const state = liveState(member)
   if (state === 'working' || state === 'checking' || state === 'waiting') return t(`activity.${state}`)
-  return member.harness
+  // An idle agent shows what it runs on, as the terminal's status line does.
+  const { label, effort } = modelOf(member, modelLists)
+  return [label, effort].filter(Boolean).join(' · ') || member.harness
 }
 
 // --- Left list: channels as Orca's project headers, agents as its workspace cards.
@@ -1280,7 +1268,7 @@ function renderChannels() {
                 'span',
                 { class: 'lines' },
                 h('span', { class: `title${isUnread(member) ? ' unread' : ''}` }, member.name, member.pinned && icon('pin', 'icon pin-mark')),
-                h('span', { class: 'meta' }, h('span', {}, stateText(member)), staminaBar(member), h('span', {}, `${staminaOf(member)}%`))
+                h('span', { class: 'meta' }, h('span', { class: 'model', title: member.harness }, stateText(member)), staminaBar(member), h('span', {}, `${staminaOf(member)}%`))
               )
             )
           )
@@ -1400,6 +1388,7 @@ function agentMenu(channel, member) {
   return [
     { header: t('menu.agentSection') },
     { icon: 'pencil', label: t('menu.rename'), run: () => renameDialog(t('menu.renameAgent'), member.name, (name) => api(`members/${member.id}/update`, { name })) },
+    { icon: 'sliders', label: t('composer.command.model'), run: () => pickModelFor(channel, member) },
     '-',
     { icon: 'terminal', label: t('palette.open'), run: () => openAgent(member.id) },
     ...pathItems(scope, projectFolder(member), ''),
@@ -1417,6 +1406,13 @@ function agentMenu(channel, member) {
     '-',
     { icon: 'trash', label: t('menu.remove'), danger: true, run: () => removeMemberDialog(channel, member) }
   ]
+}
+
+/** Opens the /model picker in a chat that has the member: the one on screen, else its home channel. */
+function pickModelFor(channel, member) {
+  const here = currentChannel()
+  selectChannel(here?.members.some(({ id }) => id === member.id) ? here : channel)
+  shell?.composer.pickModel(member.name)
 }
 
 function resetSessionDialog(member) {
@@ -2363,6 +2359,7 @@ function render() {
     }
     return
   }
+  if (!modelLists) loadModels(render)
   const channel = currentChannel() ?? ui.channels[0]
   ui.channelId = channel?.id ?? null
   if (!channel) {
