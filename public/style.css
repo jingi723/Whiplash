@@ -430,6 +430,15 @@ button.who:hover {
   resize: none;
 }
 
+.folder-row {
+  display: flex;
+  gap: 8px;
+}
+
+.folder-row button {
+  flex: none;
+}
+
 .composer textarea:focus,
 .field input:focus,
 .field textarea:focus,

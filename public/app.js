@@ -2430,18 +2430,34 @@ function field(label, control) {
 async function channelDialog() {
   const { sessions } = await api('sessions')
   const folders = h('datalist', { id: 'folders' }, [...new Set(sessions.map(({ cwd }) => cwd))].map((cwd) => h('option', { value: cwd })))
+  const name = h('input', { name: 'name', required: true, autofocus: true, placeholder: 'general', onInput: () => create.checked && suggest() })
+  const cwd = h('input', { name: 'cwd', required: true, list: 'folders', placeholder: '/Users/you/projects/app' })
+  // A new project lands next to the others under ~/projects, named after the channel; the path stays editable.
+  const suggest = () => (cwd.value = `~/projects/${name.value.trim().replace(/[\\/:]+/g, '-')}`)
+  const create = h('input', { type: 'checkbox', name: 'create', onChange: () => (create.checked ? suggest() : (cwd.value = '')) })
+  const pickFolder = window.whiplashDesktop?.pickFolder
+  const browse =
+    pickFolder &&
+    h('button', { class: 'ghost', type: 'button', onClick: async () => {
+      const path = await pickFolder()
+      if (path) {
+        cwd.value = path
+        create.checked = false
+      }
+    } }, t('channel.browse'))
   showDialog(
     t('channel.title'),
     [
-      field(t('channel.name'), h('input', { name: 'name', required: true, autofocus: true, placeholder: 'general' })),
-      field(t('channel.folder'), h('input', { name: 'cwd', required: true, list: 'folders', placeholder: '/Users/you/projects/app' })),
+      field(t('channel.name'), name),
+      field(t('channel.folder'), h('span', { class: 'folder-row' }, cwd, browse)),
       folders,
+      h('label', { class: 'check' }, create, t('channel.create')),
       field(t('channel.check'), h('input', { name: 'checkCommand', placeholder: 'pnpm build' })),
       h('p', { class: 'hint' }, t('channel.checkHint'))
     ],
     t('channel.submit'),
     async (data) => {
-      const { channel } = await api('channels', Object.fromEntries(data))
+      const { channel } = await api('channels', { ...Object.fromEntries(data), create: data.has('create') })
       // The response can beat the event stream, and the room's buttons must not keep pointing at the old channel.
       if (!ui.channels.some(({ id }) => id === channel.id)) ui.channels.push(channel)
       ui.channelId = channel.id

@@ -3,10 +3,11 @@ import { randomUUID } from 'node:crypto'
 import { existsSync, statSync } from 'node:fs'
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
+import { homedir } from 'node:os'
 import { dirname, extname, isAbsolute, join, normalize, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createConductor, runShellCheck } from './conductor.ts'
-import { createWorktree, fileDiff, gitInfo, listFiles, readLog, readProjectFile, resolveInside, searchProject, showCommit } from './git.ts'
+import { createProject, createWorktree, fileDiff, gitInfo, listFiles, readLog, readProjectFile, resolveInside, searchProject, showCommit } from './git.ts'
 import { claudeAccount, codexAccount } from './accounts.ts'
 import { probeCommands, runTurn, type StudioEvent } from './harness.ts'
 import {
@@ -221,8 +222,10 @@ function requireAttachments(value: unknown, text: string): Attachment[] {
   })
 }
 
+const expandHome = (path: string): string => path.replace(/^~(?=\/|$)/, homedir())
+
 function requireFolder(value: unknown): string {
-  const path = requireText(value, 'folder')
+  const path = expandHome(requireText(value, 'folder'))
   if (!existsSync(path) || !statSync(path).isDirectory()) {
     throw new HttpError(400, 'folderNotFound', { path })
   }
@@ -439,6 +442,14 @@ async function handleApi(
     return sendJson(response, 200, {})
   }
   if (route === 'POST /api/channels') {
+    if (body.create) {
+      const path = expandHome(requireText(body.cwd, 'folder'))
+      // Never turn someone's existing folder into a fresh repository.
+      if (!isAbsolute(path) || existsSync(path)) throw new HttpError(400, 'folderExists', { path })
+      await createProject(path).catch((error: Error) => {
+        throw new HttpError(400, 'projectFailed', { detail: error.message.trim() })
+      })
+    }
     const channel: Channel = {
       id: randomUUID(),
       name: requireText(body.name, 'channelName'),

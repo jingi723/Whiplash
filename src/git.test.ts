@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, it } from 'node:test'
-import { listFiles, parseLog, readLog, readProjectFile, searchProject, showCommit } from './git.ts'
+import { createProject, createWorktree, listFiles, parseLog, readLog, readProjectFile, searchProject, showCommit } from './git.ts'
 
 function repo(): string {
   const root = mkdtempSync(join(tmpdir(), 'whiplash-git-'))
@@ -56,5 +56,14 @@ describe('project browsing', () => {
     assert.deepEqual(parseLog('a\x1fb\x1fc\x1f10\x1fsubject\x1e\n'), [
       { sha: 'a', short: 'b', author: 'c', at: 10_000, subject: 'subject' }
     ])
+  })
+})
+
+describe('createProject', () => {
+  it('makes a repository members can branch worktrees from', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'whiplash-new-'))
+    await createProject(join(root, 'app'))
+    const worktree = await createWorktree(join(root, 'app'), join(root, 'trees'), 'app', 'coder', 'abc123')
+    assert.equal(execFileSync('git', ['branch', '--show-current'], { cwd: worktree }).toString().trim(), 'whiplash/coder-abc123')
   })
 })

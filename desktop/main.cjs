@@ -1,6 +1,6 @@
 'use strict'
 // Whiplash desktop: the same local server and page, in an Electron window like Orca's.
-const { app, BrowserWindow, ipcMain, shell, nativeImage } = require('electron')
+const { app, BrowserWindow, dialog, ipcMain, shell, nativeImage } = require('electron')
 const { spawn } = require('node:child_process')
 const { mkdirSync, openSync, readFileSync, writeFileSync } = require('node:fs')
 const os = require('node:os')
@@ -134,19 +134,14 @@ function createWindow() {
   void window.loadURL(origin)
 }
 
-// The page's unread count on the Dock icon, and a notification click bringing the window forward.
-ipcMain.on('whiplash:badge', (_event, count) => app.setBadgeCount(Math.max(0, Math.floor(Number(count) || 0))))
-ipcMain.on('whiplash:focus', () => {
-  const [window] = BrowserWindow.getAllWindows()
-  if (window) {
-    if (window.isMinimized()) window.restore()
-    window.show()
-    window.focus()
-  }
-})
-
 // Only our own page can reach these; the window never loads another origin.
 ipcMain.on('whiplash:badge', (_event, count) => app.setBadgeCount(Math.max(0, Math.floor(Number(count)) || 0)))
+// The Finder's folder sheet, with its New Folder button.
+ipcMain.handle('whiplash:pickFolder', async (event) => {
+  const window = BrowserWindow.fromWebContents(event.sender)
+  const { canceled, filePaths } = await dialog.showOpenDialog(window, { properties: ['openDirectory', 'createDirectory'] })
+  return canceled ? null : filePaths[0]
+})
 ipcMain.on('whiplash:focus', (event) => {
   const window = BrowserWindow.fromWebContents(event.sender)
   if (!window) return

@@ -62,6 +62,13 @@ export async function fileDiff(cwd: string, path: string): Promise<string> {
   return await git(info.root, 'diff', 'HEAD', '--', path)
 }
 
+/** A new project folder as a repository with one empty commit, so members can branch worktrees from it. */
+export async function createProject(path: string): Promise<void> {
+  await mkdir(path, { recursive: true })
+  await git(path, 'init')
+  await git(path, 'commit', '--allow-empty', '-m', 'Start project')
+}
+
 export async function createWorktree(
   repoCwd: string,
   worktreeRoot: string,
