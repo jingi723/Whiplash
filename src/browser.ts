@@ -192,8 +192,8 @@ export async function watchBrowser(memberId: string, emit: (event: BrowserEvent)
       if (info.type !== 'page') return
       const known = pages.has(info.targetId)
       pages.set(info.targetId, info)
-      // A tab the agent just opened is the one it works in.
-      if (!known) follow(info.targetId)
+      // A tab the agent just opened is the one it works in; Chrome's own pages (settings, updates) are not.
+      if (!known && !info.url.startsWith('chrome')) follow(info.targetId)
       else listPages()
     } else if (method === 'Target.targetDestroyed' && pages.delete(params.targetId)) {
       if (params.targetId === watched) {
