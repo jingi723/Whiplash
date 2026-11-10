@@ -305,7 +305,7 @@ function togglePanel(side) {
   panels[side] = !panels[side]
   savePanels()
   applyPanels()
-  if (side === 'right' && panels.right) render()
+  if (side === 'right') render()
 }
 
 for (const handle of document.querySelectorAll('.resizer')) {
@@ -1531,22 +1531,18 @@ function openAgent(memberId) {
   openTab(channel, { key: `agent:${memberId}`, type: 'agent', memberId })
 }
 
-// Orca adds an agent's browser tab without taking focus. Once per turn, so a tab the master closes stays closed.
+// Like Aside, an agent's browser shows in the right panel while you chat. Once per turn,
+// so a master who switches away is not pulled back; the center tab never changes.
 const browserShown = new Set()
+let panelBrowserMember = null
 function showAgentBrowser(memberId) {
   if (browserShown.has(memberId)) return
   browserShown.add(memberId)
-  const here = currentChannel()
-  const channel = here?.members.some(({ id }) => id === memberId)
-    ? here
-    : ui.channels.find(({ everyone, members }) => !everyone && members.some(({ id }) => id === memberId))
-  if (!channel) return
-  const entry = channelTabs(channel)
-  const key = `browser:${memberId}`
-  if (entry.open.some((tab) => tab.key === key)) return
-  entry.open.push({ key, type: 'browser', memberId })
-  saveTabs()
-  render()
+  panelBrowserMember = memberId
+  panelView = 'browser'
+  writeStored(PANEL_VIEW_KEY, panelView)
+  if (!panels.right) togglePanel('right')
+  else render()
 }
 
 function openBrowser(memberId) {
@@ -1652,6 +1648,43 @@ function renderBrowser(tab) {
   if (main.firstChild !== browserView.node) main.replaceChildren(browserView.node)
 }
 
+// The right panel's own view, apart from the center tab's.
+let panelBrowser = null
+
+function disposePanelBrowser() {
+  panelBrowser?.dispose()
+  panelBrowser = null
+}
+
+function renderPanelBrowser() {
+  const agents = ui.channels.filter(({ everyone }) => !everyone).flatMap(({ members }) => members)
+  const member = agents.find(({ id }) => id === panelBrowserMember)
+  const picker = h(
+    'select',
+    {
+      class: 'browser-tabs',
+      'aria-label': t('panel.browserAgent'),
+      onChange: (event) => {
+        panelBrowserMember = event.target.value
+        render()
+      }
+    },
+    ...(member ? [] : [h('option', { value: '', selected: true, disabled: true }, t('panel.browserPick'))]),
+    ...agents.map(({ id, name }) => h('option', { value: id, selected: id === panelBrowserMember }, name))
+  )
+  const toolbar = h('div', { class: 'panel-toolbar' }, h('span', { class: 'title' }, t('panel.browser')), picker)
+  if (!member) {
+    disposePanelBrowser()
+    panel.replaceChildren(toolbar, h('div', { class: 'panel-scroll' }, note(t('panel.noBrowser'))))
+    return
+  }
+  if (panelBrowser?.memberId !== member.id) {
+    disposePanelBrowser()
+    panelBrowser = { memberId: member.id, ...mountBrowser(member.id, { h, t, api }) }
+  }
+  if (panel.lastChild !== panelBrowser.node) panel.replaceChildren(toolbar, panelBrowser.node)
+}
+
 // --- Documents: read-only views of files, diffs and commits, kept while their tab stays open.
 const docs = new Map()
 
@@ -1742,7 +1775,8 @@ const PANEL_VIEW_KEY = 'whiplash.panelView'
 const PANEL_VIEWS = [
   ['explorer', 'files', 'panel.explorer'],
   ['source', 'git-branch', 'panel.source'],
-  ['history', 'history', 'panel.history']
+  ['history', 'history', 'panel.history'],
+  ['browser', 'globe', 'panel.browser']
 ]
 let panelView = PANEL_VIEWS.some(([view]) => view === readStored(PANEL_VIEW_KEY)) ? readStored(PANEL_VIEW_KEY) : 'explorer'
 let panelKey = ''
@@ -1780,7 +1814,12 @@ function renderActivity() {
 
 function renderRight(channel) {
   renderActivity()
+  if (!panels.right || panelView !== 'browser') disposePanelBrowser()
   if (!panels.right) return
+  if (panelView === 'browser') {
+    panelKey = 'browser'
+    return renderPanelBrowser()
+  }
   const scope = scopeOf(channel, activeTab(channel))
   const key = `${panelView}|${scopeKeyOf(scope)}`
   if (key === panelKey && !panelStale) return
@@ -2384,6 +2423,7 @@ function render() {
     renderChannels()
     disposeStudio()
     disposeBrowser()
+    disposePanelBrowser()
     tabsRoot.replaceChildren()
     main.replaceChildren(h('div', { class: 'empty' }, h('strong', {}, 'Not quite my tempo.'), t('home.body')))
     renderActivity()

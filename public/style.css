@@ -2957,3 +2957,11 @@ kbd {
   background: var(--raised);
   transform: translateX(-50%);
 }
+
+.browser-view:not(.controlling) .browser-frame {
+  cursor: pointer;
+}
+
+.panel .browser-tabs {
+  max-width: 80px;
+}

@@ -75,8 +75,9 @@ export function mountBrowser(memberId, { h, t, api }) {
     if (!metadata) return
     cdp('Input.dispatchMouseEvent', { type, ...pagePoint(event.clientX, event.clientY, frame.getBoundingClientRect(), metadata), modifiers: modifiersOf(event), ...extra })
   }
+  // Clicking the picture takes control, as Aside does; the click goes through too.
   on(frame, 'mousedown', (event) => {
-    if (!controlling) return
+    if (!controlling) setControl(true)
     event.preventDefault()
     keys.focus()
     held = true
