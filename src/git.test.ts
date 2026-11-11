@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, it } from 'node:test'
-import { createProject, createWorktree, listFiles, parseLog, readLog, readProjectFile, searchProject, showCommit } from './git.ts'
+import { createProject, createWorktree, listFiles, mergeWorktree, parseLog, readLog, readProjectFile, removeWorktree, searchProject, showCommit, worktreeRisk } from './git.ts'
 
 function repo(): string {
   const root = mkdtempSync(join(tmpdir(), 'whiplash-git-'))
@@ -65,5 +65,59 @@ describe('createProject', () => {
     await createProject(join(root, 'app'))
     const worktree = await createWorktree(join(root, 'app'), join(root, 'trees'), 'app', 'coder', 'abc123')
     assert.equal(execFileSync('git', ['branch', '--show-current'], { cwd: worktree }).toString().trim(), 'whiplash/coder-abc123')
+  })
+})
+
+describe('worktree cleanup', () => {
+  const gitEnv = { GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' }
+  Object.assign(process.env, gitEnv)
+  const setup = async () => {
+    const root = mkdtempSync(join(tmpdir(), 'whiplash-clean-'))
+    const app = join(root, 'app')
+    await createProject(app)
+    const tree = await createWorktree(app, join(root, 'trees'), 'app', 'coder', 'abc123')
+    const git = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd }).toString().trim()
+    writeFileSync(join(tree, 'work.txt'), 'done\n')
+    git(tree, 'add', '.')
+    git(tree, 'commit', '-q', '-m', 'Work')
+    return { app, tree, git, branch: 'whiplash/coder-abc123' }
+  }
+
+  it('merges with a merge commit, then removes the worktree and branch', async () => {
+    const { app, tree, git, branch } = await setup()
+    assert.deepEqual(await worktreeRisk(app, tree, branch), { target: git(app, 'branch', '--show-current'), dirty: false, unmerged: 1 })
+    await mergeWorktree(app, tree, branch)
+    assert.equal(git(app, 'log', '-1', '--format=%P').split(' ').length, 2)
+    assert.deepEqual(await removeWorktree(app, tree, branch, false), {})
+    assert.ok(!existsSync(tree))
+    assert.equal(git(app, 'branch', '--list', branch), '')
+  })
+
+  it('aborts a conflicting merge and refuses dirty trees', async () => {
+    const { app, tree, git, branch } = await setup()
+    writeFileSync(join(app, 'work.txt'), 'other\n')
+    git(app, 'add', '.')
+    git(app, 'commit', '-q', '-m', 'Clash')
+    const head = git(app, 'rev-parse', 'HEAD')
+    await assert.rejects(mergeWorktree(app, tree, branch), /mergeFailed/)
+    assert.equal(git(app, 'rev-parse', 'HEAD'), head)
+    assert.equal(git(app, 'status', '--porcelain'), '')
+    writeFileSync(join(tree, 'wip.txt'), 'wip\n')
+    await assert.rejects(mergeWorktree(app, tree, branch), /worktreeDirty/)
+    writeFileSync(join(app, 'work.txt'), 'edited\n')
+    await assert.rejects(mergeWorktree(app, tree, branch), /repoDirty/)
+  })
+
+  it('keeps an unmerged branch on a plain delete and drops it when forced', async () => {
+    const { app, tree, git, branch } = await setup()
+    assert.deepEqual(await removeWorktree(app, tree, branch, false), { keptBranch: branch })
+    assert.ok(!existsSync(tree))
+    assert.equal(git(app, 'branch', '--list', branch).replace('*', '').trim(), branch)
+    const second = await createWorktree(app, join(app, '..', 'trees'), 'app', 'x', 'def456')
+    writeFileSync(join(second, 'wip.txt'), 'wip\n')
+    await assert.rejects(removeWorktree(app, second, 'whiplash/x-def456', false))
+    await removeWorktree(app, second, 'whiplash/x-def456', true)
+    assert.ok(!existsSync(second))
+    assert.equal(git(app, 'branch', '--list', 'whiplash/x-def456'), '')
   })
 })

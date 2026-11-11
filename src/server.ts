@@ -1,13 +1,13 @@
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { existsSync, statSync } from 'node:fs'
-import { mkdir, readFile, stat, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { homedir } from 'node:os'
 import { dirname, extname, isAbsolute, join, normalize, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createConductor, runShellCheck } from './conductor.ts'
-import { createProject, createWorktree, fileDiff, gitInfo, listFiles, readLog, readProjectFile, resolveInside, searchProject, showCommit } from './git.ts'
+import { createProject, createWorktree, fileDiff, mergeWorktree, removeWorktree, gitInfo, listFiles, readLog, readProjectFile, resolveInside, searchProject, showCommit } from './git.ts'
 import { claudeAccount, codexAccount } from './accounts.ts'
 import { probeCommands, runTurn, type StudioEvent } from './harness.ts'
 import {
@@ -22,6 +22,7 @@ import {
   type Harness,
   type Member
 } from './model.ts'
+import { type CleanupItem, deleteTranscripts, isRisky, needsAsking, scanWorktrees, STALE_MS } from './cleanup.ts'
 import { findTranscript, listSessions } from './sessions.ts'
 import { createSaver, loadState, serverPort, whiplashHome } from './store.ts'
 import { type BrowserWatch, ChromeNotFound, closeBrowser, ensureBrowser, goHistory, watchBrowser, writeBrowserWrapper } from './browser.ts'
@@ -362,6 +363,7 @@ function openEventStream(request: IncomingMessage, response: ServerResponse): vo
     connection: 'keep-alive'
   })
   response.write(`event: state\ndata: ${JSON.stringify(snapshot())}\n\n`)
+  if (cleanupPending) response.write(`event: cleanup\ndata: ${JSON.stringify({ count: cleanupPending })}\n\n`)
   streams.add(response)
   request.on('close', () => streams.delete(response))
 }
@@ -390,6 +392,14 @@ async function handleApi(
     )
     const sessions = (await listSessions()).filter(({ id: sessionId }) => !taken.has(sessionId))
     return sendJson(response, 200, { sessions })
+  }
+  if (route === 'GET /api/cleanup') {
+    const member = url.searchParams.get('member')
+    if (member) {
+      memberById(member)
+      return sendJson(response, 200, { item: (await scanCleanup()).find(({ memberId }) => memberId === member) ?? null })
+    }
+    return sendJson(response, 200, { items: await askableWorktrees(url.searchParams.has('all')) })
   }
   if (route === 'GET /api/models') {
     return sendJson(response, 200, await listModels())
@@ -549,25 +559,97 @@ async function handleApi(
   }
   if (parts[1] === 'channels' && parts[3] === 'remove') {
     const channel = folderChannelById(id)
-    for (const member of channel.members) {
-      conductor.stop(member.id)
-      terminals.close(member.id)
-      void closeBrowser(member.id)
-    }
+    for (const member of channel.members) stopMember(member.id)
     state.channels = state.channels.filter((candidate) => candidate.id !== id)
     publishState()
     return sendJson(response, 200, {})
   }
   if (parts[1] === 'members' && parts[3] === 'remove') {
     const { channel } = memberById(id)
-    conductor.stop(id)
-    terminals.close(id)
-    void closeBrowser(id)
+    stopMember(id)
     channel.members = channel.members.filter((member) => member.id !== id)
     publishState()
     return sendJson(response, 200, {})
   }
+  if (parts[1] === 'cleanup') {
+    return sendJson(response, 200, await cleanupAction(parts[2], body))
+  }
   throw new HttpError(404, 'notFound')
+}
+
+function stopMember(id: string): void {
+  conductor.stop(id)
+  terminals.close(id)
+  void closeBrowser(id)
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000
+let cleanupPending = 0
+
+const isWorking = (memberId: string): boolean => Boolean(conductor.activityOf()[memberId]) || terminals.statusOf(memberId)?.state === 'working'
+const scanCleanup = (): Promise<CleanupItem[]> => scanWorktrees(state.channels, join(whiplashHome, 'worktrees'))
+
+/** The worktrees to ask about; an agent mid-turn is never one. `all` also shows snoozed ones, for the manual check. */
+async function askableWorktrees(all = false): Promise<CleanupItem[]> {
+  const now = Date.now()
+  const items = (await scanCleanup()).filter(
+    (item) => !(item.memberId && isWorking(item.memberId)) && needsAsking(item, state.worktreeDecisions?.[item.path], now, all)
+  )
+  if (!all) cleanupPending = items.length
+  return items
+}
+
+/** On start and once a day: open pages get told, and pages that connect later hear it from the event stream. */
+async function checkWorktrees(): Promise<void> {
+  const items = await askableWorktrees().catch((error: Error) => {
+    console.error(error)
+    return []
+  })
+  if (items.length) broadcast('cleanup', { count: items.length })
+}
+
+function removeFailed(error: Error & { stderr?: string }): never {
+  throw new HttpError(500, 'removeFailed', { detail: (error.stderr || error.message).trim() })
+}
+
+/** Only a path the scan itself found can be deleted or merged, so a request cannot point git or rm elsewhere. */
+async function cleanupAction(action: string | undefined, body: Record<string, unknown>): Promise<unknown> {
+  const path = requireText(body.path, 'folder')
+  const item = (await scanCleanup()).find((candidate) => candidate.path === path)
+  if (!item) throw new HttpError(404, 'worktreeNotFound')
+  const decisions = (state.worktreeDecisions ??= {})
+  if (action === 'snooze' || action === 'keep') {
+    decisions[path] = action === 'keep' ? { keep: true } : { snoozedUntil: Date.now() + STALE_MS }
+    publishState()
+    void askableWorktrees().catch(() => [])
+    return {}
+  }
+  if (action !== 'delete' && action !== 'merge') throw new HttpError(404, 'notFound')
+  if (item.memberId && isWorking(item.memberId)) throw new HttpError(409, 'busy')
+  let result: { keptBranch?: string } = {}
+  if (action === 'merge') {
+    if (!item.repo || !item.branch) throw new HttpError(400, 'cannotMerge')
+    await mergeWorktree(item.repo, item.path, item.branch).catch((error: Error) => {
+      const [code, detail = ''] = error.message.split(/: ([\s\S]*)/)
+      throw code === 'repoDirty' || code === 'worktreeDirty' ? new HttpError(409, code) : new HttpError(409, 'mergeFailed', { detail })
+    })
+    if (item.memberId) stopMember(item.memberId)
+    result = await removeWorktree(item.repo, item.path, item.branch, false).catch(removeFailed)
+  } else {
+    if (body.confirmed !== true) throw new HttpError(400, 'confirmRequired')
+    if (item.memberId) stopMember(item.memberId)
+    // The confirm box is the master accepting the loss, so a risky worktree is forced.
+    result = item.repo
+      ? await removeWorktree(item.repo, item.path, item.branch, isRisky(item)).catch(removeFailed)
+      : await rm(item.path, { recursive: true, force: true }).then(() => ({}))
+  }
+  // Its folder is gone, so the member goes with it; #all's list follows the home channels by itself.
+  for (const channel of state.channels.filter(({ everyone }) => !everyone)) channel.members = channel.members.filter((member) => member.id !== item.memberId)
+  delete decisions[path]
+  await deleteTranscripts(item.transcripts)
+  publishState()
+  void askableWorktrees().catch(() => [])
+  return result
 }
 
 /** Orca's "Reveal in Finder": select the item in the platform's file manager. */
@@ -733,6 +815,8 @@ for (const member of everyone.members.filter(({ harness, slashCommands }) => har
 server.listen(PORT, HOST, () => {
   console.log(`Whiplash: http://${HOST}:${PORT}`)
 })
+void checkWorktrees()
+setInterval(() => void checkWorktrees(), DAY_MS)
 
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   process.on(signal, () => {

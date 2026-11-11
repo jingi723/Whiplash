@@ -752,6 +752,46 @@ button.who:hover {
   gap: 6px;
 }
 
+.cleanup-list {
+  display: grid;
+  gap: 10px;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+.cleanup-row,
+.cleanup-confirm {
+  display: grid;
+  gap: 6px;
+}
+
+.cleanup-row {
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.cleanup-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.cleanup-warnings {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--danger-text);
+  font-size: 12px;
+}
+
+.cleanup-confirm button {
+  justify-self: end;
+}
+
+.cleanup-confirm[hidden] {
+  display: none;
+}
+
 .sessions {
   display: grid;
   gap: 2px;

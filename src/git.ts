@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process'
+import { existsSync } from 'node:fs'
 import { mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
@@ -80,6 +81,72 @@ export async function createWorktree(
   await mkdir(worktreeRoot, { recursive: true })
   await git(repoCwd, 'worktree', 'add', '-b', `whiplash/${name}-${suffix}`, path)
   return path
+}
+
+export type WorktreeEntry = { path: string; head: string; branch: string | null }
+
+/** `git worktree list --porcelain`: blocks split by blank lines; the first is the main checkout. */
+export function parseWorktreeList(porcelain: string): WorktreeEntry[] {
+  return porcelain
+    .split('\n\n')
+    .filter((block) => block.trim())
+    .map((block) => {
+      const lines = block.split('\n')
+      const value = (key: string) => lines.find((line) => line.startsWith(`${key} `))?.slice(key.length + 1)
+      return { path: value('worktree') ?? '', head: value('HEAD') ?? '', branch: value('branch')?.replace(/^refs\/heads\//, '') ?? null }
+    })
+}
+
+export async function listWorktrees(cwd: string): Promise<WorktreeEntry[]> {
+  return parseWorktreeList(await git(cwd, 'worktree', 'list', '--porcelain'))
+}
+
+/** What deleting would lose: uncommitted files, and commits the repo's current branch does not have. */
+export async function worktreeRisk(
+  repo: string,
+  worktree: string,
+  branch: string | null
+): Promise<{ target: string; dirty: boolean; unmerged: number }> {
+  const target = (await git(repo, 'branch', '--show-current')).trim() || 'HEAD'
+  const dirty = existsSync(worktree) && (await git(worktree, 'status', '--porcelain')).trim() !== ''
+  const unmerged = branch ? Number((await git(repo, 'rev-list', '--count', `HEAD..refs/heads/${branch}`)).trim()) : 0
+  return { target, dirty, unmerged }
+}
+
+/**
+ * Orca's removal rules (src/main/git/worktrees/removal, MIT, Copyright (c) 2026 Lovecast Inc.):
+ * `worktree remove` forces only when asked, prune the admin entry, then `branch -d`, which keeps an unmerged
+ * branch rather than silently discarding commits. Forced, the master has accepted losing them.
+ */
+export async function removeWorktree(
+  repo: string,
+  worktree: string,
+  branch: string | null,
+  force: boolean
+): Promise<{ keptBranch?: string }> {
+  if (existsSync(worktree)) await git(repo, 'worktree', 'remove', ...(force ? ['--force'] : []), worktree)
+  await git(repo, 'worktree', 'prune')
+  if (!branch) return {}
+  try {
+    await git(repo, 'branch', force ? '-D' : '-d', '--', branch)
+    return {}
+  } catch {
+    return { keptBranch: branch }
+  }
+}
+
+/** A merge commit of the worktree's branch into the repo's current branch; on a conflict nothing changes. */
+export async function mergeWorktree(repo: string, worktree: string, branch: string): Promise<void> {
+  if ((await git(repo, 'status', '--porcelain', '--untracked-files=no')).trim()) throw new Error('repoDirty')
+  if (existsSync(worktree) && (await git(worktree, 'status', '--porcelain')).trim()) throw new Error('worktreeDirty')
+  try {
+    // Git refuses branch names that start with `-`, so this cannot be read as an option.
+    await git(repo, 'merge', '--no-ff', '--no-edit', branch)
+  } catch (error) {
+    await git(repo, 'merge', '--abort').catch(() => '')
+    const { stdout = '', stderr = '' } = error as { stdout?: string; stderr?: string }
+    throw new Error(`mergeFailed: ${(stdout + stderr).trim()}`)
+  }
 }
 
 const FILE_LIST_LIMIT = 20_000

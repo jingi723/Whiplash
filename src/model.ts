@@ -99,7 +99,10 @@ export type Channel = {
   delivered?: Record<string, number>
 }
 
-export type State = { channels: Channel[] }
+/** The master's answer for a leftover worktree, by its path: ask again later, or never. */
+export type WorktreeDecision = { keep?: true; snoozedUntil?: number }
+
+export type State = { channels: Channel[]; worktreeDecisions?: Record<string, WorktreeDecision> }
 
 /** Where the member's work lands: the channel project for an imported session, its own folder otherwise. */
 export function projectFolder(member: Pick<Member, 'cwd' | 'writableRoots'>): string {

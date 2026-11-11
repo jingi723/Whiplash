@@ -1371,13 +1371,113 @@ function pathItems(scope, folder, path) {
   ]
 }
 
-function removeMemberDialog(channel, member) {
+/** An agent with its own worktree can take it along, under the same rules as the cleanup dialog. */
+async function removeMemberDialog(channel, member) {
+  const { item } = await api(`cleanup?member=${member.id}`).catch(() => ({ item: null }))
+  const confirm = h('div', { class: 'cleanup-confirm', hidden: true }, worktreeNotes(item ?? {}), h('label', { class: 'check' }, h('input', { type: 'checkbox', name: 'confirmed' }), t('cleanup.confirm')))
+  const withWorktree = item && h(
+    'div',
+    { class: 'cleanup-confirm' },
+    h('label', { class: 'check' }, h('input', { type: 'checkbox', name: 'worktree', onChange: (event) => (confirm.hidden = !event.target.checked) }), t('menu.removeWorktree')),
+    confirm
+  )
   showDialog(
     t('menu.remove'),
-    [h('p', { class: 'hint' }, t('menu.removeConfirm', { name: member.name, channel: channel.name }))],
+    [h('p', { class: 'hint' }, t('menu.removeConfirm', { name: member.name, channel: channel.name })), withWorktree],
     t('menu.removeSubmit'),
-    () => api(`members/${member.id}/remove`, {})
+    (data) =>
+      item && data.get('worktree')
+        ? api('cleanup/delete', { path: item.path, confirmed: data.get('confirmed') === 'on' })
+        : api(`members/${member.id}/remove`, {})
   )
+}
+
+/** What deleting a worktree loses, in the master's words. */
+function worktreeNotes(item) {
+  const warnings = [
+    item.dirty && t('cleanup.dirty'),
+    item.unmerged > 0 && t('cleanup.unmerged', { count: item.unmerged, target: item.target }),
+    item.path && !item.repo && t('cleanup.noRepo'),
+    item.missing && t('cleanup.missing')
+  ].filter(Boolean)
+  return [
+    warnings.length > 0 && h('ul', { class: 'cleanup-warnings' }, ...warnings.map((warning) => h('li', {}, warning))),
+    item.transcripts?.length > 0 && h('p', { class: 'hint' }, t('cleanup.transcripts', { count: item.transcripts.length }))
+  ]
+}
+
+function cleanupRow(item) {
+  const error = h('p', { class: 'error', role: 'alert', hidden: true })
+  const act = async (action, body = {}) => {
+    error.hidden = true
+    try {
+      const { keptBranch } = await api(`cleanup/${action}`, { path: item.path, ...body })
+      const list = row.parentElement
+      if (keptBranch) return row.replaceChildren(h('p', { class: 'hint' }, t('cleanup.keptBranch', { branch: keptBranch })))
+      row.remove()
+      if (!list.children.length) list.append(note(t('cleanup.empty')))
+    } catch (failure) {
+      error.textContent = failure.message
+      error.hidden = false
+    }
+  }
+  const confirm = h('input', { type: 'checkbox', onChange: () => (deleteNow.disabled = !confirm.checked) })
+  const deleteNow = h('button', { class: 'danger', type: 'button', disabled: true, onClick: () => act('delete', { confirmed: confirm.checked }) }, t('cleanup.deleteNow'))
+  const confirmBox = h('div', { class: 'cleanup-confirm', hidden: true }, h('label', { class: 'check' }, confirm, t('cleanup.confirm')), deleteNow)
+  const canMerge = item.repo && item.branch && !item.dirty
+  const button = (label, title, onClick, disabled = false) => h('button', { class: 'ghost', type: 'button', title, disabled, onClick }, label)
+  const row = h(
+    'div',
+    { class: 'cleanup-row' },
+    h(
+      'div',
+      { class: 'cleanup-head' },
+      h('strong', {}, item.memberName ? t('cleanup.owner', { name: item.memberName, channel: item.channelName }) : item.name),
+      !item.missing && h('span', { class: 'hint' }, t('cleanup.active', { when: timeAgo(item.lastActiveAt) }))
+    ),
+    item.memberName && h('span', { class: 'path', title: item.path }, item.name),
+    item.branch && h('span', { class: 'path' }, item.branch),
+    !item.memberId && h('p', { class: 'hint' }, t('cleanup.orphan')),
+    worktreeNotes(item),
+    item.memberId && h('p', { class: 'hint' }, t('cleanup.removesMember', { name: item.memberName, channel: item.channelName })),
+    item.dirty && item.repo && h('p', { class: 'hint' }, t('cleanup.mergeDirty')),
+    h(
+      'div',
+      { class: 'buttons' },
+      button(t('cleanup.keep'), t('cleanup.keepTitle'), () => act('keep')),
+      button(t('cleanup.snooze'), t('cleanup.snoozeTitle'), () => act('snooze')),
+      button(t('cleanup.merge'), item.target ? t('cleanup.mergeTitle', { target: item.target }) : '', () => act('merge'), !canMerge),
+      h('button', { class: 'danger', type: 'button', onClick: () => {
+          confirmBox.hidden = !confirmBox.hidden
+          confirmBox.scrollIntoView({ block: 'nearest' })
+        } }, t('cleanup.delete'))
+    ),
+    confirmBox,
+    error
+  )
+  return row
+}
+
+/** Orca's "Delete Inactive Workspaces", asked one worktree at a time: keep, snooze, merge or delete. */
+async function cleanupDialog(all = false) {
+  const list = h('div', { class: 'cleanup-list' }, note(t('studio.loading')))
+  dialog.replaceChildren(
+    h(
+      'form',
+      { method: 'dialog' },
+      h('h2', {}, t('cleanup.title')),
+      h('p', { class: 'hint' }, t('cleanup.body')),
+      list,
+      h('div', { class: 'buttons' }, h('button', { class: 'ghost', type: 'submit' }, t('dialog.close')))
+    )
+  )
+  dialog.showModal()
+  try {
+    const { items } = await api(`cleanup${all ? '?all=1' : ''}`)
+    list.replaceChildren(...(items.length ? items.map(cleanupRow) : [note(t('cleanup.empty'))]))
+  } catch (failure) {
+    list.replaceChildren(h('p', { class: 'error' }, failure.message))
+  }
 }
 
 function renameDialog(title, current, submit) {
@@ -1411,7 +1511,7 @@ function agentMenu(channel, member) {
     { icon: 'refresh', label: t('menu.resetSession'), disabled: Boolean(ui.activity[member.id]), run: () => resetSessionDialog(member) },
     { icon: 'square', label: t('studio.stop'), disabled: !ui.activity[member.id], run: () => api(`members/${member.id}/stop`, {}) },
     '-',
-    { icon: 'trash', label: t('menu.remove'), danger: true, run: () => removeMemberDialog(channel, member) }
+    { icon: 'trash', label: t('menu.remove'), danger: true, run: () => void removeMemberDialog(channel, member) }
   ]
 }
 
@@ -2387,7 +2487,8 @@ function renderSettings() {
           t('settings.notify'),
           t('settings.notifyBody'),
           segmented([['sound', t('settings.notifySound')], ['silent', t('settings.notifySilent')], ['off', t('settings.notifyOff')]], notifyMode, setNotifyMode)
-        )
+        ),
+        settingsRow(t('cleanup.title'), t('cleanup.settingsBody'), h('button', { class: 'ghost', type: 'button', onClick: () => void cleanupDialog(true) }, t('cleanup.settingsButton')))
       )
     ),
     settingsBlock('accounts', accounts),
@@ -2835,6 +2936,13 @@ events.addEventListener('state', (event) => {
   notifyChanges()
   render()
   updateBadge()
+})
+// The server checks for leftover worktrees on start and daily; ask at most once a day, never over another dialog.
+const CLEANUP_ASKED_KEY = 'whiplash.cleanupAskedAt'
+events.addEventListener('cleanup', (event) => {
+  if (!JSON.parse(event.data).count || dialog.open || Date.now() - Number(readStored(CLEANUP_ASKED_KEY) ?? 0) < 23 * 3600_000) return
+  writeStored(CLEANUP_ASKED_KEY, String(Date.now()))
+  void cleanupDialog()
 })
 events.addEventListener('browserUsed', (event) => showAgentBrowser(JSON.parse(event.data).memberId))
 events.addEventListener('log', (event) => {
