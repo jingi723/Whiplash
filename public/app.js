@@ -1813,6 +1813,11 @@ function renderFloating() {
         floating.toggleMaximized()
         renderFloating()
       }),
+      // Ends the agent's Chrome itself; its sign-ins stay in the profile, and it starts again on next use.
+      member && button('power', t('float.shutdown'), () => {
+        closeFloating(false)
+        void api(`members/${member.id}/browser/close`, {})
+      }),
       button('x', t('float.close'), () => closeFloating(false))
     )
   }
