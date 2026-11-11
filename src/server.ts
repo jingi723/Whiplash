@@ -87,6 +87,19 @@ function broadcast(type: string, data: unknown): void {
   }
 }
 
+// Agents that used their browser in the current turn; each one's Chrome closes when its turn ends.
+const browsing = new Set<string>()
+function closeIdleBrowsers(): void {
+  if (!browsing.size) return
+  const busy = conductor.activityOf()
+  for (const id of browsing) {
+    if (busy[id]) continue
+    browsing.delete(id)
+    void closeBrowser(id)
+    broadcast('browserClosed', { memberId: id })
+  }
+}
+
 let stateFrame: NodeJS.Immediate | null = null
 function publishState(): void {
   saver.schedule()
@@ -146,7 +159,10 @@ const conductor = createConductor({
     const [turn, info] = await Promise.all([readTranscriptTurn(path), stat(path)])
     return { ...turn, updatedAt: info.mtimeMs }
   },
-  onChange: publishState,
+  onChange: () => {
+    closeIdleBrowsers()
+    publishState()
+  },
   onStudioEvent(memberId, event) {
     const entry = { ...event, at: Date.now() }
     const log = logs.get(memberId) ?? []
@@ -439,7 +455,10 @@ async function handleApi(
     if (parts[4] === 'ensure') {
       const port = await ensureBrowser(id).catch(browserError)
       // An agent's own use, not a viewer reconnecting: the page adds the browser tab so the master can watch.
-      if (body.agent) broadcast('browserUsed', { memberId: id })
+      if (body.agent) {
+        browsing.add(id)
+        broadcast('browserUsed', { memberId: id })
+      }
       return sendJson(response, 200, { port })
     }
     if (parts[4] === 'close') {

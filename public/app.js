@@ -2949,6 +2949,10 @@ events.addEventListener('cleanup', (event) => {
   void cleanupDialog()
 })
 events.addEventListener('browserUsed', (event) => showAgentBrowser(JSON.parse(event.data).memberId))
+// The agent's turn ended and its Chrome was turned off, so its floating window goes too.
+events.addEventListener('browserClosed', (event) => {
+  if (floating.open && floatMember === JSON.parse(event.data).memberId) closeFloating(false)
+})
 events.addEventListener('log', (event) => {
   const { memberId, entry } = JSON.parse(event.data)
   if (studio?.memberId === memberId) studio.log.push(entry)
