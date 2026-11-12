@@ -1374,16 +1374,20 @@ function pathItems(scope, folder, path) {
 /** An agent with its own worktree can take it along, under the same rules as the cleanup dialog. */
 async function removeMemberDialog(channel, member) {
   const { item } = await api(`cleanup?member=${member.id}`).catch(() => ({ item: null }))
+  const hint = h('p', { class: 'hint' }, t('menu.removeConfirm', { name: member.name, channel: channel.name }))
   const confirm = h('div', { class: 'cleanup-confirm', hidden: true }, worktreeNotes(item ?? {}), h('label', { class: 'check' }, h('input', { type: 'checkbox', name: 'confirmed' }), t('cleanup.confirm')))
   const withWorktree = item && h(
     'div',
     { class: 'cleanup-confirm' },
-    h('label', { class: 'check' }, h('input', { type: 'checkbox', name: 'worktree', onChange: (event) => (confirm.hidden = !event.target.checked) }), t('menu.removeWorktree')),
+    h('label', { class: 'check' }, h('input', { type: 'checkbox', name: 'worktree', onChange: (event) => {
+            confirm.hidden = !event.target.checked
+            hint.textContent = t(event.target.checked ? 'menu.removeWithWorktree' : 'menu.removeConfirm', { name: member.name, channel: channel.name })
+          } }), t('menu.removeWorktree')),
     confirm
   )
   showDialog(
     t('menu.remove'),
-    [h('p', { class: 'hint' }, t('menu.removeConfirm', { name: member.name, channel: channel.name })), withWorktree],
+    [hint, withWorktree],
     t('menu.removeSubmit'),
     (data) =>
       item && data.get('worktree')
