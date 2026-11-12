@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from '
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, it } from 'node:test'
-import { createProject, createWorktree, listFiles, mergeWorktree, parseLog, readLog, readProjectFile, removeWorktree, searchProject, showCommit, worktreeRisk } from './git.ts'
+import { createProject, createWorktree, FileChanged, listFiles, mergeWorktree, parseLog, readLog, readProjectFile, removeWorktree, searchProject, showCommit, worktreeRisk, writeProjectFile } from './git.ts'
 
 function repo(): string {
   const root = mkdtempSync(join(tmpdir(), 'whiplash-git-'))
@@ -37,6 +37,18 @@ describe('project browsing', () => {
     await assert.rejects(readProjectFile(root, '/etc/passwd'))
     symlinkSync('/etc', join(root, 'escape'))
     await assert.rejects(readProjectFile(root, 'escape/hosts'))
+  })
+
+  it('saves only over the version it read, and only text files inside the project', async () => {
+    const root = repo()
+    const { version } = await readProjectFile(root, 'notes.md')
+    const next = await writeProjectFile(root, 'notes.md', 'edited\n', version!)
+    assert.equal((await readProjectFile(root, 'notes.md')).text, 'edited\n')
+    assert.equal((await readProjectFile(root, 'notes.md')).version, next)
+    await assert.rejects(writeProjectFile(root, 'notes.md', 'stale', version!), FileChanged)
+    await assert.rejects(writeProjectFile(root, 'image.bin', 'x', 'any'))
+    await assert.rejects(writeProjectFile(root, '../outside.txt', 'x', 'any'))
+    await assert.rejects(writeProjectFile(root, 'missing.txt', 'x', 'any'))
   })
 
   it('searches case-insensitively, including untracked files', async () => {

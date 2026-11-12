@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -197,7 +198,10 @@ export async function resolveInside(root: string, relative: string): Promise<str
   return target
 }
 
-export type FileContent = { path: string; text?: string; binary?: boolean; tooLarge?: boolean; size: number }
+export type FileContent = { path: string; text?: string; binary?: boolean; tooLarge?: boolean; size: number; version?: string }
+
+/** What the editor saw when it loaded; a save against any other version would overwrite someone's change. */
+const versionOf = (buffer: Buffer) => createHash('sha1').update(buffer).digest('hex')
 
 export async function readProjectFile(root: string, relative: string): Promise<FileContent> {
   const { open } = await import('node:fs/promises')
@@ -213,10 +217,26 @@ export async function readProjectFile(root: string, relative: string): Promise<F
     if (buffer.subarray(0, 8000).includes(0)) {
       return { path: relative, binary: true, size }
     }
-    return { path: relative, text: buffer.toString('utf8'), size }
+    return { path: relative, text: buffer.toString('utf8'), size, version: versionOf(buffer) }
   } finally {
     await file.close()
   }
+}
+
+export class FileChanged extends Error {}
+
+/** Saves an existing text file, refusing if it changed since `base` was read. */
+export async function writeProjectFile(root: string, relative: string, text: string, base: string): Promise<string> {
+  const { writeFile } = await import('node:fs/promises')
+  const target = await resolveInside(root, relative)
+  const current = await readProjectFile(root, relative)
+  if (current.text === undefined) throw new Error('not text')
+  // ponytail: check-then-write, not atomic; a write landing in between is lost. A lock or rename-swap if that ever bites.
+  if (current.version !== base) throw new FileChanged()
+  const buffer = Buffer.from(text, 'utf8')
+  if (buffer.length > READ_LIMIT_BYTES) throw new Error('too large')
+  await writeFile(target, buffer)
+  return versionOf(buffer)
 }
 
 export type SearchHit = { path: string; line: number; text: string }

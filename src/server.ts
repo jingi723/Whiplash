@@ -7,7 +7,7 @@ import { homedir } from 'node:os'
 import { dirname, extname, isAbsolute, join, normalize, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createConductor, runShellCheck } from './conductor.ts'
-import { createProject, createWorktree, fileDiff, mergeWorktree, removeWorktree, gitInfo, listFiles, readLog, readProjectFile, resolveInside, searchProject, showCommit } from './git.ts'
+import { createProject, createWorktree, FileChanged, fileDiff, mergeWorktree, removeWorktree, gitInfo, listFiles, readLog, readProjectFile, resolveInside, searchProject, showCommit, writeProjectFile } from './git.ts'
 import { claudeAccount, codexAccount } from './accounts.ts'
 import { probeCommands, runTurn, type StudioEvent } from './harness.ts'
 import {
@@ -553,6 +553,14 @@ async function handleApi(
       : folder
     revealInFileManager(target)
     return sendJson(response, 200, {})
+  }
+  if ((parts[1] === 'channels' || parts[1] === 'members') && parts[3] === 'file') {
+    const folder = parts[1] === 'channels' ? folderChannelById(id).cwd : projectFolder(memberById(id).member)
+    if (typeof body.path !== 'string' || typeof body.text !== 'string' || typeof body.version !== 'string') throw new HttpError(400, 'notSaved')
+    const version = await writeProjectFile(folder, body.path, body.text, body.version).catch((error) => {
+      throw error instanceof FileChanged ? new HttpError(409, 'fileChanged') : new HttpError(400, 'notSaved')
+    })
+    return sendJson(response, 200, { version })
   }
   if (parts[1] === 'members' && parts[3] === 'reset') {
     const { member } = memberById(id)
