@@ -1,6 +1,6 @@
 'use strict'
 // Whiplash desktop: the same local server and page, in an Electron window like Orca's.
-const { app, BrowserWindow, dialog, ipcMain, shell, nativeImage } = require('electron')
+const { app, BrowserWindow, clipboard, dialog, ipcMain, shell, nativeImage } = require('electron')
 const { spawn } = require('node:child_process')
 const { mkdirSync, openSync, readFileSync, writeFileSync } = require('node:fs')
 const os = require('node:os')
@@ -137,6 +137,9 @@ function createWindow() {
 // Only our own page can reach these; the window never loads another origin.
 ipcMain.on('whiplash:badge', (_event, count) => app.setBadgeCount(Math.max(0, Math.floor(Number(count)) || 0)))
 // The Finder's folder sheet, with its New Folder button.
+// The page's clipboard API can fail silently in the window; the main process always can write.
+ipcMain.on('whiplash:copy', (_event, text) => clipboard.writeText(String(text)))
+
 ipcMain.handle('whiplash:pickFolder', async (event) => {
   const window = BrowserWindow.fromWebContents(event.sender)
   const { canceled, filePaths } = await dialog.showOpenDialog(window, { properties: ['openDirectory', 'createDirectory'] })

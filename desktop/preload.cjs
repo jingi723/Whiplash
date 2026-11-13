@@ -8,5 +8,6 @@ contextBridge.exposeInMainWorld('whiplashDesktop', {
   pathForFile: (file) => webUtils.getPathForFile(file),
   setBadge: (count) => ipcRenderer.send('whiplash:badge', Number(count) || 0),
   focus: () => ipcRenderer.send('whiplash:focus'),
-  pickFolder: () => ipcRenderer.invoke('whiplash:pickFolder')
+  pickFolder: () => ipcRenderer.invoke('whiplash:pickFolder'),
+  copyText: (text) => ipcRenderer.send('whiplash:copy', String(text))
 })

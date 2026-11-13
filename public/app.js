@@ -1357,7 +1357,8 @@ function addAgentMenu(anchor, channel) {
   ])
 }
 
-const copyText = (text) => void navigator.clipboard?.writeText(text).catch(() => {})
+const copyText = (text) =>
+  window.whiplashDesktop?.copyText ? window.whiplashDesktop.copyText(text) : void navigator.clipboard?.writeText(text).catch(() => {})
 const joinPath = (folder, path) => (path ? `${folder.replace(/[\\/]+$/, '')}/${path}` : folder)
 const REVEAL_KEY = navigator.platform.startsWith('Win') ? 'menu.revealWindows' : isMac ? 'menu.revealMac' : 'menu.revealLinux'
 const reveal = (scope, path = '') => void api(`${scope.kind}/${scope.id}/reveal`, { path }).catch(() => {})
