@@ -2,6 +2,7 @@
   "name": "whiplash",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "description": "Slack-style stage that takes over your Claude Code and Codex sessions, wherever they started.",
   "engines": {

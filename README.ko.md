@@ -14,6 +14,7 @@
   <img alt="Node 24+" src="https://img.shields.io/badge/node-%E2%89%A524-339933?logo=nodedotjs&logoColor=white">
   <img alt="Electron" src="https://img.shields.io/badge/desktop-Electron-47848F?logo=electron&logoColor=white">
   <img alt="Claude Code and Codex" src="https://img.shields.io/badge/agents-Claude%20Code%20%C2%B7%20Codex-D97757">
+  <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-blue"></a>
 </p>
 
 <p align="center">
