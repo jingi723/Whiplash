@@ -48,6 +48,15 @@ describe('findTurnEnd', () => {
     assert.deepEqual(turnEnd('claude', appended), { prompted: true, done: true, aborted: false })
   })
 
+  it('does not take a background agent hand-back or task notification for a prompt', () => {
+    const appended = jsonl(
+      { type: 'user', isMeta: true, origin: { kind: 'peer' }, message: { content: 'report' } },
+      { type: 'user', origin: { kind: 'task-notification' }, message: { content: '<task-notification>' } },
+      stop
+    )
+    assert.deepEqual(turnEnd('claude', appended), { prompted: false, done: false, aborted: false })
+  })
+
   it('ends a Codex turn on completion or abort, after it started', () => {
     const event = (type: string) => ({ type: 'event_msg', payload: { type } })
     assert.deepEqual(turnEnd('codex', jsonl(event('task_complete'))), {

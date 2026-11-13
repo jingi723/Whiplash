@@ -118,7 +118,15 @@ export function findTurnEnd(harness: Harness, appended: string): TurnEnd {
   let length = 0
   for (const line of appended.split('\n')) {
     length += line.length + 1
-    let row: { type?: string; subtype?: string; isSidechain?: boolean; message?: { content?: unknown }; payload?: { type?: string } }
+    let row: {
+      type?: string
+      subtype?: string
+      isSidechain?: boolean
+      isMeta?: boolean
+      origin?: { kind?: string }
+      message?: { content?: unknown }
+      payload?: { type?: string }
+    }
     try {
       row = JSON.parse(line)
     } catch {
@@ -129,6 +137,9 @@ export function findTurnEnd(harness: Harness, appended: string): TurnEnd {
       const isPrompt =
         row.type === 'user' &&
         !row.isSidechain &&
+        // A background agent's hand-back or task notification is not a turn: Claude Code may never close it.
+        !row.isMeta &&
+        (row.origin?.kind ?? 'human') === 'human' &&
         (typeof content === 'string' ||
           (Array.isArray(content) && content.some((block) => block?.type === 'text')))
       prompted ||= isPrompt
