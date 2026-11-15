@@ -5,9 +5,9 @@ import { buildCommand, parseStreamLine } from './harness.ts'
 const line = (row: unknown): string => JSON.stringify(row)
 
 describe('buildCommand', () => {
-  it('sandboxes every turn and resumes an existing session', () => {
+  it('runs Claude with the master settings, sandboxes Codex, and resumes an existing session', () => {
     const claude = buildCommand({ harness: 'claude', sessionId: 's1' }, 'hi').args
-    assert.ok(claude.includes('--settings'))
+    assert.ok(!claude.includes('--settings') && !claude.includes('--permission-mode'))
     assert.deepEqual(claude.slice(-2), ['--resume', 's1'])
     assert.deepEqual(buildCommand({ harness: 'codex' }, 'hi').args, [
       'exec',

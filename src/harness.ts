@@ -28,15 +28,14 @@ type Parsed = {
 }
 
 const OUTPUT_LIMIT = 4000
-const CLAUDE_SANDBOX = JSON.stringify({
-  sandbox: { enabled: true, autoAllowBashIfSandboxed: true, failIfUnavailable: true }
-})
-
 function clip(text: string): string {
   return text.length > OUTPUT_LIMIT ? `${text.slice(0, OUTPUT_LIMIT)}\n… (truncated)` : text
 }
 
-/** Writes outside the agent's folder are refused by the OS sandbox of each CLI, even for imported sessions. */
+/**
+ * Claude runs with the master's own settings, as in the live terminal (a forced sandbox blocked the web and
+ * agent-browser). Codex keeps its workspace-write sandbox.
+ */
 export function buildCommand(
   member: Pick<Member, 'harness' | 'sessionId' | 'writableRoots' | 'model' | 'effort'>,
   prompt: string
@@ -51,10 +50,6 @@ export function buildCommand(
         '--output-format',
         'stream-json',
         '--verbose',
-        '--permission-mode',
-        'acceptEdits',
-        '--settings',
-        CLAUDE_SANDBOX,
         ...modelArgs(member),
         ...roots.flatMap((root) => ['--add-dir', root]),
         ...(member.sessionId ? ['--resume', member.sessionId] : [])

@@ -86,7 +86,7 @@ The app runs the same server on Electron's own Node, so it needs no system Node.
 
 - **Discovery** reads `~/.claude/projects` and `~/.codex/sessions`. Nothing needs to be installed or hooked.
 - **Takeover** runs each turn with `claude -p --resume` or `codex exec resume`. The session id stays the same, so you can reopen it in its original console.
-- **Isolation** runs every turn inside each CLI's OS sandbox, so writes outside the agent's folders are refused. An imported session may also write to the channel's project folder. Reads are not blocked.
+- **Permissions**: Claude Code turns run with your own Claude settings (permission mode, sandbox), the same as in the live terminal, so the web and `agent-browser` work. Codex turns run in Codex's workspace-write sandbox, so writes outside the agent's folders are refused; an imported session may also write to the channel's project folder.
 - **Collision guard** refuses to send to a session another console just wrote, because continuing one session from two places splits the conversation.
 - **Plan limits** are read the way Orca reads them: the Claude login from the macOS keychain (or `~/.claude/.credentials.json`) and the Codex login from `~/.codex/auth.json`. The tokens are only sent to each provider's own usage endpoint.
 - **Live terminal** runs the session's own CLI in a PTY. While it is open, Stage messages are typed into it and the reply is read from the session transcript; when it is closed, turns run headless.
@@ -95,9 +95,9 @@ The app runs the same server on Electron's own Node, so it needs no system Node.
 
 - A session that is open in a terminal can be continued in Whiplash about a minute after you close it there.
 - Headless turns refuse commands that need approval, because they have no prompt to ask. Open the terminal to approve them yourself.
-- The live terminal runs with your own CLI permission settings, not the headless sandbox.
+- Codex's live terminal runs with your own Codex settings, not the headless sandbox.
 - If the terminal is showing a dialog, a Stage message cannot get in; Whiplash says so after 20 seconds.
-- Agents in their own worktree may fail to `git commit` because of the sandbox. Their changes stay uncommitted.
+- Codex agents in their own worktree may fail to `git commit` because of the sandbox. Their changes stay uncommitted.
 - Restarting the server clears Studio logs and stops running headless turns. Channels and conversations are kept.
 - The server listens only on `127.0.0.1` and refuses requests from other origins. Do not expose it.
 
