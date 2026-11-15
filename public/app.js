@@ -383,7 +383,7 @@ function applyStaticText() {
   labelButton('#toggle-left', t('panel.left'), 'panel-left')
   labelButton('#toggle-right', t('panel.right'), 'panel-right')
   labelButton('#toggle-right-floating', t('panel.right'), 'panel-right')
-  labelButton('#new-tab', t('nav.addAgent'), 'plus')
+  labelButton('#new-tab', t('nav.newTab'), 'plus')
   for (const handle of document.querySelectorAll('.resizer')) handle.setAttribute('aria-label', t('panel.resize'))
   renderUsage()
   applyPanels()
