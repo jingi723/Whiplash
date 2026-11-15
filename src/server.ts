@@ -186,6 +186,7 @@ function snapshot(): unknown {
     activity: conductor.activityOf(),
     queued: conductor.queuedOf(),
     terminals: terminals.openIds(),
+    shells: terminals.shells(),
     terminalStatus: terminals.statuses()
   }
 }
@@ -429,7 +430,8 @@ async function handleApi(
     return sendJson(response, 200, { log: logs.get(id) ?? [] })
   }
   if (request.method === 'GET' && parts[1] === 'members' && parts[3] === 'terminal') {
-    memberById(id)
+    // A shell's terminal is reached the same way; it just has no member behind it.
+    if (!terminals.isShell(id)) memberById(id)
     return openTerminalStream(request, response, id)
   }
   // Before the folder views below, which would read `browser` as one of theirs.
@@ -520,6 +522,19 @@ async function handleApi(
     conductor.stop(id)
     return sendJson(response, 202, {})
   }
+  if (parts[1] === 'channels' && parts[3] === 'shells') {
+    const channel = folderChannelById(id)
+    const shell = terminals.openShell(channel.id, channel.cwd, terminalSize(body.cols, 120), terminalSize(body.rows, 32))
+    return sendJson(response, 201, shell)
+  }
+  if (parts[1] === 'members' && parts[3] === 'terminal' && terminals.isShell(id)) {
+    const action = parts[4]
+    if (action === 'input' && typeof body.data === 'string') terminals.write(id, body.data)
+    else if (action === 'resize') terminals.resize(id, terminalSize(body.cols, 120), terminalSize(body.rows, 32))
+    else if (action === 'close') terminals.close(id)
+    else throw new HttpError(404, 'notFound')
+    return sendJson(response, 200, {})
+  }
   if (parts[1] === 'members' && parts[3] === 'terminal') {
     const { member } = memberById(id)
     const action = parts[4]
@@ -587,6 +602,7 @@ async function handleApi(
   if (parts[1] === 'channels' && parts[3] === 'remove') {
     const channel = folderChannelById(id)
     for (const member of channel.members) stopMember(member.id)
+    for (const shell of terminals.shells()) if (shell.channelId === id) terminals.close(shell.id)
     state.channels = state.channels.filter((candidate) => candidate.id !== id)
     publishState()
     return sendJson(response, 200, {})

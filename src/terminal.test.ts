@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
-import { findTurnEnd, interactiveCommand } from './terminal.ts'
+import { findTurnEnd, interactiveCommand, nextShellNumber } from './terminal.ts'
 
 const jsonl = (...rows: unknown[]): string => rows.map((row) => JSON.stringify(row)).join('\n')
 
@@ -87,5 +87,13 @@ describe('findTurnEnd', () => {
     const end = findTurnEnd('claude', `${first}\n${next}`)
     assert.equal(end.length, first.length + 1)
     assert.equal(turnEnd('claude', next).prompted, true)
+  })
+})
+
+describe('nextShellNumber', () => {
+  it('numbers shells per channel after the highest one open', () => {
+    const shells = [{ id: 'a', channelId: 'c', n: 1 }, { id: 'b', channelId: 'c', n: 3 }, { id: 'd', channelId: 'x', n: 7 }]
+    assert.equal(nextShellNumber(shells, 'c'), 4)
+    assert.equal(nextShellNumber(shells, 'new'), 1)
   })
 })

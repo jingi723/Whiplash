@@ -42,6 +42,8 @@ const ui = {
   activity: {},
   queued: [],
   terminals: [],
+  /** Plain shells the master opened, from the PTY host: { id, channelId, n }. */
+  shells: [],
   terminalStatus: {},
   commands: {},
   replyTo: {},
@@ -1348,10 +1350,13 @@ function showMenu(x, y, items) {
   menu.querySelector('button:not(:disabled)')?.focus()
 }
 
-function addAgentMenu(anchor, channel) {
+function addAgentMenu(anchor, channel, withTerminal = false) {
   if (!channel) return
   const rect = anchor.getBoundingClientRect()
+  // The menu focuses its first item, so Enter right away opens a terminal, as Orca's empty query does.
   showMenu(rect.left, rect.bottom + 4, [
+    withTerminal && !channel.everyone && { icon: 'terminal', label: t('tabs.newTerminal'), run: () => void newTerminal(channel) },
+    withTerminal && !channel.everyone && '-',
     { icon: 'download', label: t('stage.import'), run: () => void importDialog(channel) },
     { icon: 'user-plus', label: t('stage.hire'), run: () => hireDialog(channel) }
   ])
@@ -1595,12 +1600,15 @@ function markSeen(members) {
 const TABS_KEY = 'whiplash.tabs'
 ui.tabs = readJson(TABS_KEY, {})
 const STAGE_TAB = { key: 'stage', type: 'stage' }
-const TAB_ICONS = { stage: 'hash', agent: 'terminal', browser: 'globe', file: 'file', diff: 'file-diff', commit: 'git-commit' }
+const TAB_ICONS = { stage: 'hash', agent: 'terminal', shell: 'terminal', browser: 'globe', file: 'file', diff: 'file-diff', commit: 'git-commit' }
 
 function channelTabs(channel) {
   const entry = (ui.tabs[channel.id] ??= { open: [], active: 'stage' })
   const memberIds = new Set(channel.members.map(({ id }) => id))
-  entry.open = entry.open.filter((tab) => !tab.memberId || memberIds.has(tab.memberId))
+  // Shell tabs follow the host: one per live shell, so they come back after a reload and go when it exits.
+  const shells = ui.shells.filter(({ channelId }) => channelId === channel.id)
+  entry.open = entry.open.filter((tab) => (!tab.memberId || memberIds.has(tab.memberId)) && (tab.type !== 'shell' || shells.some(({ id }) => id === tab.key)))
+  for (const shell of shells) if (!entry.open.some(({ key }) => key === shell.id)) entry.open.push({ key: shell.id, type: 'shell' })
   if (!entry.open.some(({ key }) => key === entry.active)) entry.active = 'stage'
   return entry
 }
@@ -1638,6 +1646,14 @@ function closeTab(channel, key) {
   render()
 }
 
+async function newTerminal(channel) {
+  await reportTerminalColors()
+  const shell = await api(`channels/${channel.id}/shells`, measure(main))
+  // Before the next state event, which would otherwise drop the tab as unknown.
+  ui.shells = [...ui.shells, shell]
+  openTab(channel, { key: shell.id, type: 'shell' })
+}
+
 function openAgent(memberId) {
   const channel = ui.channels.find(({ everyone, members }) => !everyone && members.some(({ id }) => id === memberId))
   openTab(channel, { key: `agent:${memberId}`, type: 'agent', memberId })
@@ -1663,6 +1679,7 @@ function tabTitle(channel, tab) {
   if (tab.type === 'stage') return channel.name
   if (tab.type === 'agent' || tab.type === 'browser') return channel.members.find(({ id }) => id === tab.memberId)?.name ?? '?'
   if (tab.type === 'commit') return tab.short
+  if (tab.type === 'shell') return t('tabs.terminal', { n: ui.shells.find(({ id }) => id === tab.key)?.n ?? '?' })
   return tab.path.split('/').pop()
 }
 
@@ -1745,6 +1762,28 @@ let browserView = null
 function disposeBrowser() {
   browserView?.dispose()
   browserView = null
+}
+
+// --- Shell: a plain terminal in the channel's folder, drawn like an agent's.
+let shellView = null
+
+function disposeShell() {
+  shellView?.term.dispose()
+  shellView = null
+}
+
+function renderShell(tab) {
+  if (shellView?.key !== tab.key) {
+    disposeShell()
+    const slot = h('div', { class: 'terminal-slot' })
+    slot.style.background = terminalTheme().background
+    const page = h('section', { class: 'studio-page' }, slot)
+    main.replaceChildren(page)
+    // An exit needs nothing here: the next state drops the tab.
+    shellView = { key: tab.key, page, slot, term: mountTerminal(slot, tab.key, () => {}) }
+  } else if (main.firstChild !== shellView.page) {
+    main.replaceChildren(shellView.page)
+  }
 }
 
 function renderBrowser(tab) {
@@ -1939,6 +1978,8 @@ function openDocument(scope, tab) {
 
 /** Closing a tab saves what is left unsaved, then forgets it. */
 function dropDoc(key) {
+  // Closing a shell's tab ends the shell.
+  if (key.startsWith('shell-')) void api(`members/${key}/terminal/close`, {}).catch(() => {})
   const doc = docs.get(key)
   if (doc?.editor) void saveDoc(doc)
   docs.delete(key)
@@ -2736,6 +2777,7 @@ function render() {
     renderChannels()
     disposeStudio()
     disposeBrowser()
+    disposeShell()
     tabsRoot.replaceChildren()
     main.replaceChildren(h('div', { class: 'empty' }, h('strong', {}, 'Not quite my tempo.'), t('home.body')))
     renderActivity()
@@ -2750,12 +2792,14 @@ function render() {
   renderChannels()
   renderTabs(channel, tab)
   if (tab.type !== 'browser') disposeBrowser()
+  if (tab.type !== 'shell') disposeShell()
   if (member) {
     renderStudio(member)
   } else {
     disposeStudio()
     if (tab.type === 'stage') renderStage(channel)
     else if (tab.type === 'browser') renderBrowser(tab)
+    else if (tab.type === 'shell') renderShell(tab)
     else renderDocument(tab)
   }
   renderRight(channel)
@@ -3014,12 +3058,16 @@ function reject(member) {
 document.querySelector('#new-channel').addEventListener('click', () => void channelDialog())
 document.querySelector('#open-palette').addEventListener('click', switchPalette)
 document.querySelector('#open-settings').addEventListener('click', () => (location.hash = '#/settings'))
-document.querySelector('#new-tab').addEventListener('click', (event) => addAgentMenu(event.currentTarget, currentChannel()))
+document.querySelector('#new-tab').addEventListener('click', (event) => addAgentMenu(event.currentTarget, currentChannel(), true))
 // The open terminal repaints with the matching Orca theme; runs only after startup, once studio exists.
 function repaintForTheme() {
   if (studio) {
     studio.termSlot.style.background = terminalTheme().background
     studio.term?.setTheme(terminalTheme())
+  }
+  if (shellView) {
+    shellView.slot.style.background = terminalTheme().background
+    shellView.term.setTheme(terminalTheme())
   }
   settingsDirty = true
   applyStaticText()
@@ -3106,6 +3154,7 @@ events.addEventListener('state', (event) => {
   ui.activity = next.activity
   ui.queued = next.queued ?? []
   ui.terminals = next.terminals ?? []
+  ui.shells = next.shells ?? []
   ui.terminalStatus = next.terminalStatus ?? {}
   ui.commands = next.commands ?? {}
   notifyChanges()

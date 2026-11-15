@@ -6,7 +6,7 @@ import { connect, type Socket } from 'node:net'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { memberEnv } from './env.ts'
+import { agentEnv, memberEnv } from './env.ts'
 import type { TurnResult } from './harness.ts'
 import { buildAgentPromptPasteBytes, getAgentPromptSubmitDelayMs } from './orca/agent-prompt-injection.ts'
 import { createProgramStatusOscScanner } from './orca/program-status/osc-scanner.ts'
@@ -81,7 +81,13 @@ export async function connectPtyHost(home: string = whiplashHome): Promise<Socke
 }
 
 /** What the host keeps beside a session so a restarted server can pick up where it left off. */
-type SessionMeta = { harness: Harness; cwd: string; startedAt: number; sessionId?: string; discover: boolean }
+type SessionMeta = { harness?: Harness; cwd: string; startedAt: number; sessionId?: string; discover: boolean; shell?: Shell }
+/** A plain login shell the master opened in a channel's folder; no agent, no turns, just a terminal. */
+export type Shell = { id: string; channelId: string; n: number }
+
+/** Shells are numbered per channel, after the highest one still open. */
+export const nextShellNumber = (shells: Shell[], channelId: string): number =>
+  1 + Math.max(0, ...shells.filter((shell) => shell.channelId === channelId).map(({ n }) => n))
 
 /** The interactive CLI for a member; a new Claude session gets its id up front so Stage can follow it. */
 export function interactiveCommand(
@@ -212,6 +218,7 @@ type Session = {
   listeners: Set<(event: TerminalEvent) => void>
   /** Known to the terminal before the member records it, which waits until the transcript exists. */
   sessionId?: string
+  shell?: Shell
 }
 export type TerminalEvent = { type: 'data'; data: string; cols?: number; rows?: number } | { type: 'exit'; code: number }
 
@@ -269,7 +276,7 @@ export function createTerminalHub(
         } else if (event.type === 'report' && event.report.id === null && event.report.state !== 'clear') {
           const next: TerminalStatus = { state: event.report.state, ...(event.report.kind ? { kind: event.report.kind } : {}) }
           if (next.state !== session.status?.state || next.kind !== session.status?.kind) {
-            if (live && session.status?.state === 'working' && next.state !== 'working') onTurnEnd(memberId)
+            if (live && !session.shell && session.status?.state === 'working' && next.state !== 'working') onTurnEnd(memberId)
             session.status = next
             if (live) onChange()
           }
@@ -297,7 +304,7 @@ export function createTerminalHub(
         while (Date.now() - meta.startedAt < SESSION_DISCOVERY_MS && sessions.get(memberId) === session) {
           await delay(2000)
           const found = meta.sessionId
-            ? (await findTranscript(meta.harness, meta.sessionId)) && meta.sessionId
+            ? (await findTranscript(meta.harness!, meta.sessionId)) && meta.sessionId
             : await findNewCodexSession(meta.cwd, meta.startedAt)
           if (found) {
             session.sessionId = found
@@ -339,6 +346,30 @@ export function createTerminalHub(
     attach(member.id, { pty, buffer: '', listeners: new Set(), sessionId }, meta)
   }
 
+  /** Opens $SHELL as a login shell in the folder; it lives in the host like an agent's CLI. */
+  function openShell(channelId: string, cwd: string, cols: number, rows: number): Shell {
+    if (!host) throw new Error('PTY host is not connected')
+    const shell: Shell = { id: `shell-${randomUUID()}`, channelId, n: nextShellNumber(shells(), channelId) }
+    const meta: SessionMeta = { cwd, startedAt: Date.now(), discover: false, shell }
+    const pty = remotePty(shell.id, cols, rows)
+    send({
+      type: 'open',
+      id: shell.id,
+      command: process.env.SHELL || '/bin/zsh',
+      args: ['-l'],
+      cwd,
+      env: { ...agentEnv(), TERM: 'xterm-256color', COLORTERM: 'truecolor' },
+      cols,
+      rows,
+      meta
+    })
+    attach(shell.id, { pty, buffer: '', listeners: new Set(), shell }, meta)
+    return shell
+  }
+
+  const shells = (): Shell[] => [...sessions.values()].flatMap(({ shell }) => (shell ? [shell] : []))
+  const agentSessions = () => [...sessions].filter(([, session]) => !session.shell)
+
   /** Connects (starting the host if needed) and takes back every session still running there. */
   async function connectHost(): Promise<void> {
     const socket = await connectPtyHost(home)
@@ -359,7 +390,7 @@ export function createTerminalHub(
             for (const { id, cols, rows, buffer, meta } of message.sessions as { id: string; cols: number; rows: number; buffer: string; meta: SessionMeta }[]) {
               if (sessions.has(id)) continue
               const pty = remotePty(id, cols, rows)
-              attach(id, { pty, buffer, listeners: new Set(), sessionId: meta.sessionId }, meta, buffer)
+              attach(id, { pty, buffer, listeners: new Set(), sessionId: meta.sessionId, shell: meta.shell }, meta, buffer)
             }
             resolve()
           }
@@ -463,6 +494,9 @@ export function createTerminalHub(
 
   return {
     open: openTerminal,
+    openShell,
+    shells,
+    isShell: (id: string): boolean => Boolean(sessions.get(id)?.shell),
     typeTurn,
     /** Types more words into a turn that is already running, as the master could in the terminal itself. */
     async inject(memberId: string, prompt: string): Promise<void> {
@@ -472,8 +506,8 @@ export function createTerminalHub(
     isOpen: (memberId: string): boolean => sessions.has(memberId),
     statusOf: (memberId: string): TerminalStatus | undefined => sessions.get(memberId)?.status,
     statuses: (): Record<string, TerminalStatus> =>
-      Object.fromEntries([...sessions].flatMap(([id, session]) => (session.status ? [[id, session.status]] : []))),
-    openIds: (): string[] => [...sessions.keys()],
+      Object.fromEntries(agentSessions().flatMap(([id, session]) => (session.status ? [[id, session.status]] : []))),
+    openIds: (): string[] => agentSessions().map(([id]) => id),
     write(memberId: string, data: string): void {
       sessions.get(memberId)?.pty.write(data)
     },
