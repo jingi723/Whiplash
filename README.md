@@ -53,6 +53,10 @@ The app runs the same server on Electron's own Node, so it needs no system Node.
 2. **Import a session** to add a recent Claude Code or Codex session as a member, or **hire a new agent** that works in its own git worktree.
 3. **Command**: call members with `@name`. `@all` runs every member at once, and the `#all` channel seats every agent in one room.
 
+## 📱 Phone
+
+Chat with your agents from a phone over [Tailscale](https://tailscale.com). Install Tailscale on the Mac and the phone, run `tailscale serve --bg 4717` on the Mac, then open Settings → Phone → Connect phone and scan the QR code. Add the page to the Home Screen and tap the bell to get a notice when an agent replies. The server still listens only on 127.0.0.1; other hosts need a paired device, which you can revoke in the same place. Terminals and files stay on the desktop for now.
+
 ## 🎺 Features
 
 ### The band
