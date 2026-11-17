@@ -245,6 +245,8 @@ export function buildTurnPrompt(channel: Channel, member: Member): string {
     .filter(
       ({ seq, author, command }) =>
         !command &&
+        // System notices (compacted, joined, …) are for the master's screen, not the agents.
+        author.kind !== 'system' &&
         seq > (fresh ? 0 : deliveredThrough(channel, member)) &&
         (fresh || !(author.kind === 'agent' && author.memberId === member.id))
     )

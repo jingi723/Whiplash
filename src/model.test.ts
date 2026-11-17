@@ -105,6 +105,13 @@ describe('turns', () => {
     assert.ok(prompt.includes('[@Reviewer]\n봐줘'))
   })
 
+  it('keeps system notices out of the prompt', () => {
+    const live = { ...member, sessionId: 's', deliveredThrough: 2 }
+    const notice = { id: 'n', seq: 4, author: { kind: 'system' as const }, text: 'Compacted', at: 4 }
+    const noisy = { ...channel, messages: [...channel.messages, notice], nextSeq: 5 }
+    assert.equal(buildTurnPrompt(noisy, live), '이후')
+  })
+
   it('drains stamina against the known window and infers 1M past 200k', () => {
     assert.equal(staminaPercent({}), 100)
     assert.equal(staminaPercent({ contextTokens: 100_000 }), 50)
