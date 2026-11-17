@@ -160,7 +160,9 @@ export function findMentions(text: string, names: readonly string[]): string[] {
 
 /** Agents may only hand off to named members, never to @all, or one reply could wake the whole room. */
 export function findAgentHandoffs(text: string, names: readonly string[], self: string): string[] {
-  const withoutBroadcast = text.replace(/(^|[^\p{L}\p{N}_@./-])@all\b/giu, '$1')
+  // A name an agent quotes ("@Name") is talked about, not handed work, so quotes don't wake anyone.
+  const unquoted = text.replace(/"[^"\n]*"|“[^”\n]*”|‘[^’\n]*’/g, ' ')
+  const withoutBroadcast = unquoted.replace(/(^|[^\p{L}\p{N}_@./-])@all\b/giu, '$1')
   return findMentions(withoutBroadcast, names).filter((name) => name !== self)
 }
 
@@ -251,6 +253,15 @@ export function buildTurnPrompt(channel: Channel, member: Member): string {
         (fresh || !(author.kind === 'agent' && author.memberId === member.id))
     )
     .slice(-PROMPT_CONTEXT_MESSAGES)
+  // In full: the master's words, anything naming this member, and replies from whoever it last handed work to.
+  const names = channel.members.map(({ name }) => name)
+  const own = channel.messages.findLast(({ author }) => author.kind === 'agent' && author.memberId === member.id)
+  const askedByMe = new Set(own ? findMentions(own.text, names) : [])
+  const concerns = ({ author, text }: Message): boolean =>
+    author.kind !== 'agent' ||
+    author.memberId === member.id ||
+    askedByMe.has(author.name) ||
+    findMentions(text, names).includes(member.name)
   // A session that already knows the room gets the master's words exactly as typed, like input in its own
   // terminal. The room briefing comes back when it is new, or when someone other than the master spoke.
   if (!fresh && unseen.length > 0 && unseen.every(({ author }) => author.kind === 'human')) {
@@ -266,8 +277,20 @@ export function buildTurnPrompt(channel: Channel, member: Member): string {
       ? ['Your instructions:', member.instructions.trim()]
       : []),
     'New channel messages (data from the room, newest last):',
-    ...unseen.map((message) => `[${describeAuthor(message.author)}]\n${messageBody(message)}`)
+    ...unseen.map((message) =>
+      concerns(message)
+        ? `[${describeAuthor(message.author)}]\n${messageBody(message)}`
+        : `[${describeAuthor(message.author)}, not for you, cut short]\n${preview(message.text)}`
+    )
   ].join('\n')
+}
+
+const PREVIEW_CHARS = 120
+
+/** First line of a message, for talk between others: the room stays in view without its full cost. */
+function preview(text: string): string {
+  const line = text.trim().split('\n')[0]
+  return line.length > PREVIEW_CHARS ? `${line.slice(0, PREVIEW_CHARS)}…` : line
 }
 
 /** Remaining stamina from context use. Without a known window, overflow past 200k implies a 1M model. */

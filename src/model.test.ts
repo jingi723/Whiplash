@@ -26,6 +26,7 @@ describe('mentions', () => {
 
   it('broadcasts @all for humans but never for agents', () => {
     assert.deepEqual(findMentions('@all 시작', names), names)
+    assert.deepEqual(findAgentHandoffs('"@리뷰어"라고 적어서 “@coder-agent” 불림', names, 'x'), [])
     assert.deepEqual(findAgentHandoffs('@all 끝', names, 'Coder-Agent'), [])
     assert.deepEqual(findAgentHandoffs('@Coder-Agent @리뷰어 봐줘', names, 'Coder-Agent'), ['리뷰어'])
   })
@@ -102,7 +103,30 @@ describe('turns', () => {
     const busy = { ...channel, messages: [...channel.messages, other], nextSeq: 5 }
     const prompt = buildTurnPrompt(busy, live)
     assert.ok(prompt.startsWith('You are @Coder'))
-    assert.ok(prompt.includes('[@Reviewer]\n봐줘'))
+    assert.ok(prompt.includes('[@Reviewer, not for you, cut short]\n봐줘'))
+  })
+
+  it('cuts talk between others short but keeps what concerns the member in full', () => {
+    const live = { ...member, sessionId: 's', deliveredThrough: 3 }
+    const long = 'x'.repeat(300)
+    const say = (seq: number, memberId: string, name: string, text: string) =>
+      ({ id: `m${seq}`, seq, author: { kind: 'agent' as const, memberId, name }, text, at: seq })
+    const room = {
+      ...channel,
+      members: [member, { ...member, id: 'm2', name: 'Reviewer' }, { ...member, id: 'm3', name: 'Other' }],
+      messages: [
+        ...channel.messages.slice(0, 2).map((m, i) => (i === 1 ? { ...m, text: '@Reviewer 봐줘' } : m)),
+        say(4, 'm3', 'Other', `first line ${long}\nsecond line`),
+        say(5, 'm2', 'Reviewer', `done ${long}`),
+        say(6, 'm3', 'Other', `@Coder ${long}`)
+      ],
+      nextSeq: 7
+    }
+    const prompt = buildTurnPrompt(room, live)
+    assert.ok(prompt.includes('[@Other, not for you, cut short]\nfirst line'))
+    assert.ok(!prompt.includes('second line'))
+    assert.ok(prompt.includes(`done ${long}`))
+    assert.ok(prompt.includes(`@Coder ${long}`))
   })
 
   it('keeps system notices out of the prompt', () => {
