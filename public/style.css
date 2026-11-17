@@ -291,13 +291,19 @@ pre {
   display: flex;
   align-items: baseline;
   gap: 8px;
+  min-width: 0;
 }
 
+/* A long name gives way to an ellipsis, so the time and reply button stay inside the column. */
 .who {
+  min-width: 0;
+  overflow: hidden;
   padding: 0;
   border: 0;
   background: none;
   font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 button.who:hover {
@@ -306,11 +312,13 @@ button.who:hover {
 }
 
 .time {
+  flex: none;
   color: var(--muted);
   font-size: 11px;
 }
 
 .tempo {
+  flex: none;
   margin-left: auto;
   padding: 1px 8px;
   border: 1px solid var(--line);
@@ -2590,6 +2598,7 @@ kbd {
 
 .settings-section {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 24px;
   scroll-margin-top: 32px;
 }
@@ -2783,10 +2792,35 @@ kbd {
     display: none;
   }
 
-  /* 16px keeps iOS from zooming into the composer. */
+  html,
+  body {
+    overflow: hidden;
+    overscroll-behavior: none;
+  }
+
+  .messages {
+    overflow-x: hidden;
+  }
+
+  .page-toolbar strong {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  /* 16px keeps iOS from zooming into a field, which leaves the page panned sideways. */
   .composer textarea,
-  .field input {
+  .field :is(input, select, textarea),
+  .palette .palette-input {
     font-size: 16px;
+  }
+
+  .settings-row {
+    flex-wrap: wrap;
+  }
+
+  .settings-inner {
+    padding: 24px 16px 64px;
   }
 
   .settings-body {
