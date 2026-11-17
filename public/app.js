@@ -283,11 +283,24 @@ async function refreshUsage(force = false) {
 const phone = matchMedia('(max-width: 760px)')
 const isRemote = !['127.0.0.1', 'localhost'].includes(location.hostname)
 let phoneChat = false
-// iOS keeps the layout viewport under the keyboard; the app takes the visible height so the composer stays above it.
-window.visualViewport?.addEventListener('resize', () => {
-  document.documentElement.style.setProperty('--viewport-h', `${visualViewport.height}px`)
+// iOS keeps the layout viewport under the keyboard and pans the page to the focused field. The app takes the
+// visible height and follows the visible top, so the header stays on screen and the composer sits on the keyboard.
+const KEYBOARD_MIN_PX = 120
+function fitViewport() {
+  const view = window.visualViewport
+  if (!view) return
+  const list = shell?.list
+  const stick = list && list.scrollHeight - list.scrollTop - list.clientHeight < NEAR_BOTTOM_PX
   window.scrollTo(0, 0)
-})
+  const root = document.documentElement.style
+  root.setProperty('--viewport-h', `${view.height}px`)
+  root.setProperty('--viewport-top', `${view.offsetTop}px`)
+  document.documentElement.classList.toggle('keyboard-open', innerHeight - view.height > KEYBOARD_MIN_PX)
+  if (stick) list.scrollTop = list.scrollHeight
+}
+window.visualViewport?.addEventListener('resize', fitViewport)
+window.visualViewport?.addEventListener('scroll', fitViewport)
+document.addEventListener('focusin', () => requestAnimationFrame(fitViewport))
 
 const PANELS_KEY = 'whiplash.panels.v2'
 const LEFT_WIDTH = { min: 220, max: 500 }
