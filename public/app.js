@@ -283,31 +283,33 @@ async function refreshUsage(force = false) {
 const phone = matchMedia('(max-width: 760px)')
 const isRemote = !['127.0.0.1', 'localhost'].includes(location.hostname)
 let phoneChat = false
-// iOS keeps the layout viewport under the keyboard and pans the page to the focused field. The app takes the
-// visible height and the page is scrolled back to the top, so the header stays on screen and the composer sits on the keyboard.
+// Adapted from Element Hydrogen v0.4.1 (Apache-2.0), src/platform/web/Platform.js adaptUIOnVisualViewportResize:
+// mobile Safari shifts the layout viewport up without resizing it when the keyboard shows
+// (https://bugs.webkit.org/show_bug.cgi?id=141832), so the app takes the visible height and follows the shift.
+const isIOS = /iPad|iPhone|iPod/.test(navigator.platform) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
 const KEYBOARD_MIN_PX = 120
-const REFIT_AFTER_BLUR_MS = 150
-function fitViewport() {
+function adaptToVisualViewport() {
   const view = window.visualViewport
-  if (!view) return
   const list = shell?.list
-  const before = list?.clientHeight
-  window.scrollTo(0, 0)
-  document.documentElement.style.setProperty('--viewport-h', `${view.height}px`)
-  document.documentElement.classList.toggle('keyboard-open', innerHeight - view.height > KEYBOARD_MIN_PX)
-  // The chat keeps its bottom edge where it was, as Hydrogen does, so a shrinking list doesn't hide the newest lines.
-  if (list) list.scrollTop += before - list.clientHeight
+  const scrollTopBefore = list?.scrollTop
+  const heightBefore = list?.offsetHeight
+  // visualViewport.offsetTop can lag behind, so the offset is computed from the app's own bottom edge, as Hydrogen does.
+  const offsetTop = appRoot.offsetTop + appRoot.offsetHeight - view.height
+  appRoot.style.setProperty('--ios-viewport-height', `${view.height}px`)
+  appRoot.style.setProperty('--ios-viewport-top', `${offsetTop}px`)
+  // Whiplash's addition: the keyboard covers the home indicator, so its safe-area inset is dropped meanwhile.
+  appRoot.classList.toggle('keyboard-open', innerHeight - view.height > KEYBOARD_MIN_PX)
+  if (list) list.scrollTop = scrollTopBefore + heightBefore - list.offsetHeight
 }
-window.visualViewport?.addEventListener('resize', fitViewport)
-window.visualViewport?.addEventListener('scroll', fitViewport)
-document.addEventListener('focusin', () => requestAnimationFrame(fitViewport))
-// A home-screen app can keep the keyboard's height after it closes until measured again.
-document.addEventListener('focusout', () => setTimeout(fitViewport, REFIT_AFTER_BLUR_MS))
 
 const PANELS_KEY = 'whiplash.panels.v2'
 const LEFT_WIDTH = { min: 220, max: 500 }
 const RIGHT_MIN = 220
 const appRoot = document.querySelector('#app')
+if (isIOS && window.visualViewport) {
+  appRoot.classList.add('ios')
+  window.visualViewport.addEventListener('resize', adaptToVisualViewport)
+}
 const panels = { left: true, right: true, leftWidth: 280, rightWidth: 350 }
 Object.assign(panels, readJson(PANELS_KEY, {}))
 
@@ -623,6 +625,9 @@ function saveDraft(channelId, text, attachments = []) {
   draftTimer = setTimeout(() => writeStored(DRAFTS_KEY, JSON.stringify(drafts)), 300)
 }
 
+// Before iOS 26, Safari has no field-sizing, so the composer grows by script there.
+// Adapted from Element Hydrogen v0.4.1 (Apache-2.0), MessageComposer.js _adjustHeight/_clearHeight.
+const GROWS_NATIVELY = CSS.supports('field-sizing', 'content')
 function createComposer(channelId) {
   // A half-written command outlives switching tabs, channels or reloading, as Orca keeps its composer drafts.
   const input = h('textarea', { rows: 1 })
@@ -648,6 +653,10 @@ function createComposer(channelId) {
     recalled = target
     load(target === -1 ? held : entries[entries.length - 1 - target])
     return true
+  }
+  const adjustHeight = () => {
+    input.style.removeProperty('height')
+    if (input.value) input.style.height = `${input.scrollHeight}px`
   }
   const list = h('ul', { class: 'suggestions', role: 'listbox', hidden: true })
   let active = 0
@@ -724,6 +733,7 @@ function createComposer(channelId) {
     refresh()
   }
   function refresh() {
+    if (!GROWS_NATIVELY) adjustHeight()
     const options = matches()
     active = Math.min(active, Math.max(options.length - 1, 0))
     list.hidden = options.length === 0

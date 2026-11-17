@@ -2769,19 +2769,23 @@ kbd {
 
 /* Phone: the channel list, or one channel's chat with a back button. Desktop chrome is hidden. */
 @media (max-width: 760px) {
-  /* Pinned to the top with the visible height, which shrinks while the iOS keyboard is up. */
+  /* Adapted from Element Hydrogen v0.4.1 (Apache-2.0), ui/css/layout.css .SessionView:
+  fixed and full height, which follows the url bar on mobile. On iOS it is resized and moved to the visible
+  area, since mobile Safari shifts the layout viewport up without resizing it when the keyboard shows. */
   .app {
     position: fixed;
-    top: 0;
-    right: 0;
-    left: 0;
-    height: var(--viewport-h, 100dvh);
+    width: 100%;
+    height: 100%;
     padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
-    box-sizing: border-box;
+  }
+
+  .app.ios {
+    height: var(--ios-viewport-height, 100%);
+    top: var(--ios-viewport-top, 0);
   }
 
   /* The keyboard covers the home indicator, so its inset would only leave a gap above the keyboard. */
-  .keyboard-open .app {
+  .app.keyboard-open {
     padding-bottom: 0;
   }
 
