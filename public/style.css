@@ -2769,10 +2769,10 @@ kbd {
 
 /* Phone: the channel list, or one channel's chat with a back button. Desktop chrome is hidden. */
 @media (max-width: 760px) {
-  /* Pinned to the visible part of the screen, which shrinks and moves while the iOS keyboard is up. */
+  /* Pinned to the top with the visible height, which shrinks while the iOS keyboard is up. */
   .app {
     position: fixed;
-    top: var(--viewport-top, 0);
+    top: 0;
     right: 0;
     left: 0;
     height: var(--viewport-h, 100dvh);

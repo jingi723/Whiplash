@@ -284,23 +284,25 @@ const phone = matchMedia('(max-width: 760px)')
 const isRemote = !['127.0.0.1', 'localhost'].includes(location.hostname)
 let phoneChat = false
 // iOS keeps the layout viewport under the keyboard and pans the page to the focused field. The app takes the
-// visible height and follows the visible top, so the header stays on screen and the composer sits on the keyboard.
+// visible height and the page is scrolled back to the top, so the header stays on screen and the composer sits on the keyboard.
 const KEYBOARD_MIN_PX = 120
+const REFIT_AFTER_BLUR_MS = 150
 function fitViewport() {
   const view = window.visualViewport
   if (!view) return
   const list = shell?.list
-  const stick = list && list.scrollHeight - list.scrollTop - list.clientHeight < NEAR_BOTTOM_PX
+  const before = list?.clientHeight
   window.scrollTo(0, 0)
-  const root = document.documentElement.style
-  root.setProperty('--viewport-h', `${view.height}px`)
-  root.setProperty('--viewport-top', `${view.offsetTop}px`)
+  document.documentElement.style.setProperty('--viewport-h', `${view.height}px`)
   document.documentElement.classList.toggle('keyboard-open', innerHeight - view.height > KEYBOARD_MIN_PX)
-  if (stick) list.scrollTop = list.scrollHeight
+  // The chat keeps its bottom edge where it was, as Hydrogen does, so a shrinking list doesn't hide the newest lines.
+  if (list) list.scrollTop += before - list.clientHeight
 }
 window.visualViewport?.addEventListener('resize', fitViewport)
 window.visualViewport?.addEventListener('scroll', fitViewport)
 document.addEventListener('focusin', () => requestAnimationFrame(fitViewport))
+// A home-screen app can keep the keyboard's height after it closes until measured again.
+document.addEventListener('focusout', () => setTimeout(fitViewport, REFIT_AFTER_BLUR_MS))
 
 const PANELS_KEY = 'whiplash.panels.v2'
 const LEFT_WIDTH = { min: 220, max: 500 }
