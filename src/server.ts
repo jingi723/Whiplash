@@ -33,6 +33,9 @@ import { readUsage } from './usage.ts'
 import { codexPrompts, expandCodexPrompt, listModels } from './models.ts'
 import { createTerminalHub } from './terminal.ts'
 import { readTranscriptTurn } from './transcript.ts'
+import { createDevices, deviceCookie, deviceName, type Device, sendPush, tailscaleHost, vapidKeys } from './remote.ts'
+import QRCode from 'qrcode'
+import { createTranslator, pickLocale } from '../public/i18n.js'
 
 const PORT = serverPort
 const HOST = '127.0.0.1'
@@ -57,7 +60,9 @@ const CONTENT_TYPES: Record<string, string> = {
   '.css': 'text/css; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
   '.mjs': 'text/javascript; charset=utf-8',
-  '.svg': 'image/svg+xml'
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.webmanifest': 'application/manifest+json'
 }
 
 /** Errors carry a code the browser translates; `message` is English for API clients. */
@@ -79,6 +84,8 @@ const everyone = linkEveryoneChannel(state)
 const saver = createSaver(state)
 const logs = new Map<string, (StudioEvent & { at: number })[]>()
 const streams = new Set<ServerResponse>()
+const devices = createDevices(whiplashHome)
+const vapid = vapidKeys(whiplashHome)
 
 function broadcast(type: string, data: unknown): void {
   const frame = `event: ${type}\ndata: ${JSON.stringify(data)}\n\n`
@@ -162,6 +169,7 @@ const conductor = createConductor({
   onChange: () => {
     closeIdleBrowsers()
     publishState()
+    pushReplies()
   },
   onStudioEvent(memberId, event) {
     const entry = { ...event, at: Date.now() }
@@ -358,14 +366,68 @@ async function saveUpload(request: IncomingMessage): Promise<string> {
   return path
 }
 
-/** This server can drive agents on the machine, so pages from other origins must never reach it. */
-function isTrustedRequest(request: IncomingMessage): boolean {
-  const allowed = new Set([`127.0.0.1:${PORT}`, `localhost:${PORT}`])
+const LOCAL_HOSTS = new Set([`127.0.0.1:${PORT}`, `localhost:${PORT}`])
+const isLocal = (request: IncomingMessage): boolean => LOCAL_HOSTS.has(request.headers.host ?? '')
+
+/**
+ * This server can drive agents on the machine, so pages from other origins must never reach it.
+ * The local window is trusted by its host alone; any other host (Tailscale serve) needs a paired
+ * device's cookie, and a write must say it comes from that same host.
+ */
+function checkOrigin(request: IncomingMessage): void {
   const origin = request.headers.origin
-  return (
-    allowed.has(request.headers.host ?? '') &&
-    (origin === undefined || allowed.has(origin.replace(/^https?:\/\//, '')))
-  )
+  if (isLocal(request)) {
+    if (origin !== undefined && !LOCAL_HOSTS.has(origin.replace(/^https?:\/\//, ''))) throw new HttpError(403, 'forbidden')
+    return
+  }
+  const write = request.method !== 'GET' && request.method !== 'HEAD'
+  if (origin === undefined ? write : origin !== `https://${request.headers.host}`) throw new HttpError(403, 'forbidden')
+}
+
+function requireLocal(request: IncomingMessage): void {
+  if (!isLocal(request)) throw new HttpError(403, 'forbidden')
+}
+
+/** The page a phone sees before it is paired: a short note and a field for the code shown on the Mac. */
+function sendPairPage(request: IncomingMessage, response: ServerResponse, failed: boolean): void {
+  const t = createTranslator(pickLocale(undefined, String(request.headers['accept-language'] ?? '').split(',')))
+  response.writeHead(401, {
+    'content-type': 'text/html; charset=utf-8',
+    'cache-control': 'no-store',
+    'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'",
+    'x-content-type-options': 'nosniff'
+  })
+  response.end(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Whiplash</title>
+<style>body{font:16px -apple-system,system-ui,sans-serif;background:#1a1a1a;color:#eee;max-width:28em;margin:15vh auto;padding:0 20px}input,button{font:inherit;padding:8px 10px;border-radius:8px;border:1px solid #555}input{background:#111;color:#eee;width:10em}p.e{color:#f87171}</style></head>
+<body><h1>Whiplash</h1><p>${t('pair.body')}</p>${failed ? `<p class="e">${t('pair.failed')}</p>` : ''}
+<form action="/pair"><input name="code" autocomplete="one-time-code" placeholder="${t('pair.code')}" required> <button>${t('pair.submit')}</button></form></body></html>`)
+}
+
+/** Payload-less pushes to every subscribed phone when an agent posts; each phone shows a generic notice. */
+const pushedSeq = new Map(state.channels.map(({ id, nextSeq }) => [id, nextSeq]))
+function pushReplies(): void {
+  let replied = false
+  for (const channel of state.channels) {
+    const since = pushedSeq.get(channel.id) ?? 1
+    pushedSeq.set(channel.id, channel.nextSeq)
+    replied ||= channel.messages.some(({ seq, author, alertMemberId }) => seq >= since && (author.kind === 'agent' || alertMemberId))
+  }
+  if (!replied) return
+  for (const endpoint of devices.list().flatMap(({ push }) => push)) {
+    void sendPush(endpoint, vapid).then(
+      (status) => {
+        if (status === 404 || status === 410) devices.dropPush(endpoint)
+      },
+      () => {}
+    )
+  }
+}
+
+async function remoteInfo(): Promise<unknown> {
+  return {
+    host: await tailscaleHost(),
+    devices: devices.list().map(({ id, name, pairedAt, push }) => ({ id, name, pairedAt, push: push.length > 0 }))
+  }
 }
 
 function sendJson(response: ServerResponse, status: number, body: unknown): void {
@@ -388,7 +450,8 @@ function openEventStream(request: IncomingMessage, response: ServerResponse): vo
 async function handleApi(
   request: IncomingMessage,
   response: ServerResponse,
-  url: URL
+  url: URL,
+  device: Device | undefined
 ): Promise<void> {
   const route = `${request.method} ${url.pathname}`
   const parts = url.pathname.split('/').filter(Boolean)
@@ -396,6 +459,13 @@ async function handleApi(
 
   if (route === 'GET /api/events') {
     return openEventStream(request, response)
+  }
+  if (route === 'GET /api/remote') {
+    requireLocal(request)
+    return sendJson(response, 200, await remoteInfo())
+  }
+  if (route === 'GET /api/push/key') {
+    return sendJson(response, 200, { key: vapid.publicKey })
   }
   if (route === 'GET /api/usage') {
     return sendJson(response, 200, await readUsage(url.searchParams.has('force')))
@@ -452,6 +522,23 @@ async function handleApi(
     return sendJson(response, 201, { path: await saveUpload(request) })
   }
   const body = await readJson(request)
+  if (route === 'POST /api/remote/pair') {
+    requireLocal(request)
+    const host = requireText(body.host, 'host').replace(/^https?:\/\//, '').replace(/\/.*$/, '')
+    const url = `https://${host}/pair?code=${devices.newCode()}`
+    return sendJson(response, 200, { url, qr: await QRCode.toString(url, { type: 'svg', margin: 1 }) })
+  }
+  if (parts[1] === 'remote' && parts[2] === 'devices' && parts[4] === 'revoke') {
+    requireLocal(request)
+    if (!devices.revoke(parts[3])) throw new HttpError(404, 'notFound')
+    return sendJson(response, 200, await remoteInfo())
+  }
+  if (route === 'POST /api/push/subscribe') {
+    const endpoint = String(body.endpoint ?? '')
+    if (!device || !endpoint.startsWith('https://')) throw new HttpError(400, 'badPush')
+    devices.addPush(device, endpoint)
+    return sendJson(response, 200, {})
+  }
   if (parts[1] === 'members' && parts[3] === 'browser') {
     memberById(id)
     if (parts[4] === 'ensure') {
@@ -815,12 +902,21 @@ async function serveStatic(response: ServerResponse, pathname: string): Promise<
 
 const server = createServer((request, response) => {
   void (async () => {
-    if (!isTrustedRequest(request)) {
-      throw new HttpError(403, 'forbidden')
-    }
+    checkOrigin(request)
     const url = new URL(request.url ?? '/', `http://${HOST}:${PORT}`)
+    const device = isLocal(request) ? undefined : devices.fromCookie(request.headers.cookie)
+    if (!isLocal(request) && url.pathname === '/pair') {
+      const token = devices.redeem(url.searchParams.get('code')?.trim() ?? '', deviceName(request.headers['user-agent']))
+      if (!token) return sendPairPage(request, response, true)
+      response.writeHead(302, { location: '/', 'set-cookie': deviceCookie(token), 'cache-control': 'no-store' })
+      return response.end()
+    }
+    if (!isLocal(request) && !device) {
+      if (url.pathname.startsWith('/api/')) throw new HttpError(401, 'unpaired')
+      return sendPairPage(request, response, false)
+    }
     if (url.pathname.startsWith('/api/')) {
-      await handleApi(request, response, url)
+      await handleApi(request, response, url, device)
     } else {
       await serveStatic(response, url.pathname)
     }
