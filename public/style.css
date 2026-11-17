@@ -2705,8 +2705,101 @@ kbd {
   -webkit-app-region: no-drag;
 }
 
+/* Connect phone: the pairing QR stays white so phone cameras read it in dark mode. */
+.phone-command,
+.phone-qr code {
+  display: block;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: var(--muted-bg);
+  font: 12px var(--mono);
+  user-select: all;
+  overflow-wrap: anywhere;
+}
+
+.phone-qr img {
+  display: block;
+  width: 200px;
+  margin: 12px auto 8px;
+  padding: 8px;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.phone-back {
+  display: none;
+}
+
+/* Phone: the channel list, or one channel's chat with a back button. Desktop chrome is hidden. */
 @media (max-width: 760px) {
-  .sidebar-right {
+  .app {
+    height: var(--viewport-h, 100dvh);
+    padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+    box-sizing: border-box;
+  }
+
+  .sidebar-right,
+  .statusbar,
+  .resizer,
+  .tabstrip,
+  .drag-strip,
+  .sidebar-toggle,
+  .hover-actions,
+  #new-channel,
+  #theme,
+  body .floating-panel {
+    display: none;
+  }
+
+  .app .sidebar-left,
+  .app.left-closed .sidebar-left {
+    width: 100%;
+  }
+
+  .app.left-closed .left-body {
+    display: flex;
+  }
+
+  .app.left-closed .titlebar-left {
+    position: static;
+  }
+
+  .workbench {
+    border-left: 0;
+  }
+
+  .app:not(.phone-chat) .workbench,
+  .app.phone-chat .sidebar-left {
+    display: none;
+  }
+
+  .phone-back {
+    display: inline-flex;
+    margin-left: -6px;
+  }
+
+  .page-toolbar .path,
+  .page-toolbar .tag {
+    display: none;
+  }
+
+  /* 16px keeps iOS from zooming into the composer. */
+  .composer textarea,
+  .field input {
+    font-size: 16px;
+  }
+
+  .settings-body {
+    flex-direction: column;
+    overflow: auto;
+  }
+
+  .settings-nav {
+    width: auto;
+    border-right: 0;
+  }
+
+  .settings-nav nav {
     display: none;
   }
 }
@@ -3196,4 +3289,8 @@ kbd {
   bottom: 0;
   left: 0;
   cursor: nesw-resize;
+}
+
+.icon-xs[hidden] {
+  display: none;
 }

@@ -135,6 +135,7 @@ const ICONS = {
     ['path', { d: 'm22 22-5-10-5 10' }],
     ['path', { d: 'M14 18h6' }]
   ],
+  smartphone: [['rect', { x: 5, y: 2, width: 14, height: 20, rx: 2 }], ['path', { d: 'M12 18h.01' }]],
   keyboard: [
     ['path', { d: 'M10 8h.01' }],
     ['path', { d: 'M12 12h.01' }],

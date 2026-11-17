@@ -279,6 +279,16 @@ async function refreshUsage(force = false) {
 
 // --- Panels, as Orca does them: Mod+B and Mod+L toggle the sides, edges drag to resize, all remembered.
 // v2: Orca's default widths (280 left, 350 right) replace the narrower ones saved before.
+// A phone shows one pane at a time, the channel list or one channel's chat; terminals and files stay on the desktop for now.
+const phone = matchMedia('(max-width: 760px)')
+const isRemote = !['127.0.0.1', 'localhost'].includes(location.hostname)
+let phoneChat = false
+// iOS keeps the layout viewport under the keyboard; the app takes the visible height so the composer stays above it.
+window.visualViewport?.addEventListener('resize', () => {
+  document.documentElement.style.setProperty('--viewport-h', `${visualViewport.height}px`)
+  window.scrollTo(0, 0)
+})
+
 const PANELS_KEY = 'whiplash.panels.v2'
 const LEFT_WIDTH = { min: 220, max: 500 }
 const RIGHT_MIN = 220
@@ -384,6 +394,7 @@ function applyStaticText() {
   labelButton('#toggle-right', t('panel.right'), 'panel-right')
   labelButton('#toggle-right-floating', t('panel.right'), 'panel-right')
   labelButton('#new-tab', t('nav.newTab'), 'plus')
+  labelButton('#push', t('push.enable'), 'bell')
   for (const handle of document.querySelectorAll('.resizer')) handle.setAttribute('aria-label', t('panel.resize'))
   renderUsage()
   applyPanels()
@@ -1065,6 +1076,11 @@ function renderStage(channel) {
   composer.input.setAttribute('aria-label', t('composer.aria', { channel: channel.name }))
   composer.list.setAttribute('aria-label', t('composer.suggestions'))
   bar.replaceChildren(
+    h(
+      'button',
+      { class: 'icon-xs phone-back', type: 'button', title: t('nav.back'), 'aria-label': t('nav.back'), onClick: () => ((phoneChat = false), render()) },
+      icon('arrow-left')
+    ),
     h('strong', {}, `# ${channel.name}`),
     channel.everyone
       ? h('span', { class: 'path' }, t('stage.everyone', { count: channel.members.length }))
@@ -1193,6 +1209,7 @@ const currentChannel = () => ui.channels.find(({ id }) => id === ui.channelId)
 
 function selectChannel(channel) {
   ui.channelId = channel.id
+  phoneChat = true
   channelTabs(channel).active = 'stage'
   saveTabs()
   if (ui.view === 'settings') location.hash = '#/'
@@ -1656,6 +1673,12 @@ async function newTerminal(channel) {
 
 function openAgent(memberId) {
   const channel = ui.channels.find(({ everyone, members }) => !everyone && members.some(({ id }) => id === memberId))
+  // No terminal on a phone yet: the agent's card opens its channel with the reply aimed at it.
+  if (phone.matches && channel) {
+    ui.replyTo[channel.id] = memberId
+    delete ui.replyMessage[channel.id]
+    return selectChannel(channel)
+  }
   openTab(channel, { key: `agent:${memberId}`, type: 'agent', memberId })
 }
 
@@ -2583,8 +2606,72 @@ const SETTINGS_SECTIONS = [
   ['general', 'sliders'],
   ['accounts', 'circle-user'],
   ['terminal', 'terminal'],
-  ['shortcuts', 'keyboard']
+  ['shortcuts', 'keyboard'],
+  // Pairing is for the Mac's own window; a phone cannot pair others.
+  ...(isRemote ? [] : [['phone', 'smartphone']])
 ]
+
+/** Connect phone: a QR code of a one-time pairing URL on the Mac's tailnet name. */
+function phoneDialog() {
+  const host = h('input', { required: true, autofocus: true, placeholder: 'mac.tail1234.ts.net', spellcheck: 'false', autocapitalize: 'off' })
+  const result = h('div', { class: 'phone-qr' })
+  const form = h(
+    'form',
+    {
+      onSubmit: async (event) => {
+        event.preventDefault()
+        try {
+          const { url, qr } = await api('remote/pair', { host: host.value })
+          result.replaceChildren(
+            h('img', { src: `data:image/svg+xml,${encodeURIComponent(qr)}`, alt: url }),
+            h('code', {}, url),
+            h('p', { class: 'hint' }, t('phone.scan', { code: new URL(url).searchParams.get('code') }))
+          )
+        } catch (failure) {
+          result.replaceChildren(h('p', { class: 'error' }, failure.message))
+        }
+      }
+    },
+    h('h2', {}, t('phone.connect')),
+    h('p', { class: 'hint' }, t('phone.steps')),
+    h('pre', { class: 'phone-command' }, `tailscale serve --bg ${location.port}`),
+    field(t('phone.host'), host),
+    h('p', { class: 'hint' }, t('phone.hostHint')),
+    result,
+    h(
+      'div',
+      { class: 'buttons' },
+      h('button', { class: 'ghost', type: 'button', onClick: () => dialog.close() }, t('dialog.close')),
+      h('button', { class: 'primary', type: 'submit' }, t('phone.show'))
+    )
+  )
+  dialog.replaceChildren(form)
+  // The new device shows in the list once the dialog closes.
+  dialog.addEventListener('close', () => ((settingsDirty = true), render()), { once: true })
+  dialog.showModal()
+  void api('remote').then(({ host: found }) => {
+    if (found && !host.value) host.value = found
+  }, () => {})
+}
+
+function phoneCard() {
+  const card = h('div', { class: 'settings-card' })
+  const show = ({ devices }) =>
+    card.replaceChildren(
+      settingsRow(t('phone.connect'), t('phone.connectBody'), h('button', { class: 'ghost', type: 'button', onClick: phoneDialog }, t('phone.connect'))),
+      ...(devices ?? []).map((device) =>
+        settingsRow(
+          device.name,
+          [t('phone.paired', { date: new Date(device.pairedAt).toLocaleDateString(locale) }), device.push && t('phone.pushOn')].filter(Boolean).join(' · '),
+          h('button', { class: 'ghost', type: 'button', onClick: () => void api(`remote/devices/${device.id}/revoke`, {}).then(show) }, t('phone.revoke'))
+        )
+      ),
+      devices && !devices.length && note(t('phone.none'))
+    )
+  show({})
+  void api('remote').then(show, () => {})
+  return card
+}
 
 function settingsBlock(id, ...cards) {
   return h(
@@ -2708,6 +2795,7 @@ function renderSettings() {
     ),
     settingsBlock('accounts', accounts),
     settingsBlock('terminal', terminal),
+    !isRemote && settingsBlock('phone', phoneCard()),
     settingsBlock(
       'shortcuts',
       h(
@@ -2785,7 +2873,8 @@ function render() {
     panelKey = ''
     return
   }
-  const tab = activeTab(channel)
+  appRoot.classList.toggle('phone-chat', phoneChat)
+  const tab = phone.matches ? STAGE_TAB : activeTab(channel)
   const member = tab.type === 'agent' && channel.members.find(({ id }) => id === tab.memberId)
   // Looking is reading: the stage shows every member's replies, an agent tab its own terminal.
   if (document.visibilityState === 'visible') markSeen(member ? [member] : tab.type === 'stage' ? channel.members : [])
@@ -3142,6 +3231,35 @@ function updateBadge() {
   window.whiplashDesktop?.setBadge?.(count)
   document.title = count ? `(${count}) Whiplash` : 'Whiplash'
 }
+
+// --- Web Push for a paired phone. iOS offers it only to a Home Screen app, and only from a tap.
+const pushButton = document.querySelector('#push')
+const base64Bytes = (text) => Uint8Array.from(atob(text.replace(/-/g, '+').replace(/_/g, '/')), (char) => char.charCodeAt(0))
+
+async function enablePush() {
+  if (!('PushManager' in window)) return alert(t('push.install'))
+  if ((await Notification.requestPermission()) !== 'granted') return alert(t('push.denied'))
+  const registration = await navigator.serviceWorker.ready
+  const { key } = await api('push/key')
+  const subscription = await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: base64Bytes(key) })
+  await api('push/subscribe', { endpoint: subscription.endpoint })
+  pushButton.hidden = true
+}
+
+if (isRemote && navigator.serviceWorker) {
+  pushButton.addEventListener('click', () => void enablePush().catch((failure) => alert(failure.message)))
+  // The worker cannot read the page's language, so the notice's words ride in its URL.
+  void navigator.serviceWorker.register(`/sw.js?${new URLSearchParams({ body: t('push.body') })}`)
+  void navigator.serviceWorker.ready
+    .then((registration) => registration.pushManager?.getSubscription())
+    .then((subscription) => {
+      pushButton.hidden = Boolean(subscription)
+      // A re-paired phone keeps its subscription; the server learns it again under the new device.
+      if (subscription) void api('push/subscribe', { endpoint: subscription.endpoint }).catch(() => {})
+    })
+}
+
+phone.addEventListener('change', render)
 
 const events = new EventSource('/api/events')
 events.addEventListener('state', (event) => {
