@@ -942,10 +942,13 @@ function createShell(channelId) {
   const bar = h('div', { class: 'page-toolbar' })
   const list = h('div', { class: 'messages', role: 'log' })
   const typing = h('div', { class: 'typing', 'aria-live': 'polite' })
-  const node = h('section', { class: 'stage' }, bar, list, typing, composer.element)
+  const jump = h('button', { class: 'jump-latest', type: 'button', hidden: true, onClick: () => list.scrollTo({ top: list.scrollHeight, behavior: 'smooth' }) })
+  const showJump = () => (jump.hidden = list.scrollHeight - list.scrollTop - list.clientHeight < list.clientHeight)
+  list.addEventListener('scroll', showJump, { passive: true })
+  const node = h('section', { class: 'stage' }, bar, list, h('div', { class: 'jump-row' }, jump), typing, composer.element)
   // Files dropped anywhere on the stage go into the message as paths.
   acceptFileDrops(node, composer.insertPaths)
-  return { channelId, messageIds: [], membersKey: '', composer, bar, list, typing, node }
+  return { channelId, messageIds: [], membersKey: '', composer, bar, list, typing, jump, showJump, node }
 }
 
 const nameButtons = (members) =>
@@ -1070,7 +1073,7 @@ function renderStage(channel) {
   if (shell?.channelId !== channel.id) {
     shell = createShell(channel.id)
   }
-  const { composer, bar, list, typing, node } = shell
+  const { composer, bar, list, typing, jump, node } = shell
   const stick = list.scrollHeight - list.scrollTop - list.clientHeight < NEAR_BOTTOM_PX
   if (main.firstChild !== node) main.replaceChildren(node)
   composer.input.setAttribute('aria-label', t('composer.aria', { channel: channel.name }))
@@ -1092,6 +1095,8 @@ function renderStage(channel) {
   renderTyping(channel, typing)
   showReplyTarget(channel)
   if (stick) list.scrollTop = list.scrollHeight
+  jump.replaceChildren(icon('chevron-down'), t('stage.jumpLatest'))
+  shell.showJump()
 }
 
 function renderEntry(entry) {
