@@ -749,7 +749,9 @@ function createComposer(channelId) {
     if (!list.hidden) list.children[active]?.scrollIntoView({ block: 'nearest' })
   }
   const chip = h('span', { class: 'chip', hidden: true })
-  const box = h('div', { class: 'composer-box', 'data-drop-hint': t('composer.drop') }, chip, input)
+  // A phone keyboard's return makes a new line, so phones send with this button, as chat apps do.
+  const sendButton = h('button', { class: 'composer-send', type: 'button', title: t('composer.send'), 'aria-label': t('composer.send'), onPointerdown: (event) => event.preventDefault(), onClick: () => void submit() }, icon('arrow-up'))
+  const box = h('div', { class: 'composer-box', 'data-drop-hint': t('composer.drop') }, chip, input, sendButton)
   const insertText = (text) => {
     const before = input.value.slice(0, input.selectionStart)
     input.setRangeText(`${before && !/\s$/.test(before) ? ' ' : ''}${text} `, input.selectionStart, input.selectionEnd, 'end')
@@ -863,7 +865,7 @@ function createComposer(channelId) {
       setReplyTo(currentChannel(), null)
       return
     }
-    if (event.key === 'Enter' && !event.shiftKey) {
+    if (event.key === 'Enter' && !event.shiftKey && !phone.matches) {
       event.preventDefault()
       void submit()
     }

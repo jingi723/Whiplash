@@ -3370,3 +3370,27 @@ kbd {
 .icon-xs[hidden] {
   display: none;
 }
+
+.composer-send {
+  display: none;
+}
+
+@media (max-width: 760px) {
+  .composer-box textarea {
+    padding-right: 40px;
+  }
+
+  .composer-send {
+    position: absolute;
+    right: 6px;
+    bottom: 6px;
+    display: grid;
+    place-items: center;
+    width: 32px;
+    height: 32px;
+    border: 0;
+    border-radius: 50%;
+    background: var(--brand);
+    color: #fff;
+  }
+}
