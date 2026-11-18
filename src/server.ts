@@ -324,7 +324,8 @@ async function addMember(channel: Channel, body: Record<string, unknown>): Promi
     // As Orca does: a folder Whiplash just made needs no trust prompt. A busy config only means the prompt still shows.
     await grantClaudeWorkspaceTrust(resolveLocalClaudeTrustConfig(agentEnv()), cwd).catch(() => 'unreadable')
   }
-  return { ...base, harness: body.harness, cwd }
+  // The master's choice: new agents start at medium rather than the CLI's own default; `/model` still changes it.
+  return { ...base, harness: body.harness, cwd, effort: 'medium' }
 }
 
 async function readJson(request: IncomingMessage): Promise<Record<string, unknown>> {
