@@ -1541,6 +1541,35 @@ kbd {
   padding-top: 4px;
 }
 
+/* Orca's WorktreeSidebarDropIndicator: a ring-colored line with a dot at each end. */
+.drop-indicator {
+  position: fixed;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  height: 12px;
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+
+.drop-indicator[hidden] {
+  display: none;
+}
+
+.drop-indicator span {
+  width: 6px;
+  height: 6px;
+  flex-shrink: 0;
+  border-radius: 999px;
+  background: var(--ring);
+  box-shadow: 0 0 0 2px var(--left);
+}
+
+.drop-indicator span:nth-child(2) {
+  flex: 1;
+  height: 2px;
+}
+
 .card {
   display: flex;
   align-items: center;

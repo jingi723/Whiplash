@@ -1272,6 +1272,8 @@ function renderChannels() {
           role: 'button',
           tabindex: 0,
           'aria-current': tab?.type === 'stage' ? 'page' : undefined,
+          'data-channel-id': channel.everyone ? undefined : channel.id,
+          onPointerdown: (event) => armChannelDrag(event, channel),
           onClick: () => selectChannel(channel),
           onKeydown: (event) => {
             if (event.target !== event.currentTarget || (event.key !== 'Enter' && event.key !== ' ')) return
@@ -1332,6 +1334,91 @@ function renderChannels() {
       return h('div', { class: 'group' }, header, ...cards)
     })
   )
+}
+
+// --- Channel order: drag a channel header, as Orca reorders its project headers.
+// Adapted from Orca (MIT, Copyright (c) 2026 Lovecast Inc.)
+// src/renderer/src/components/sidebar/worktree-list/drag/project-header-drag.ts,
+// worktree-sidebar-header-drop-preview.ts, header-drag-click-swallow.ts and WorktreeSidebarDropIndicator.tsx @ stablyai/orca c969e11
+// Changes: mouse only, no autoscroll or virtualization; #all stays put and every other channel is one bucket.
+const CHANNEL_DRAG_THRESHOLD_PX = 4
+const dropIndicator = h('div', { class: 'drop-indicator', role: 'presentation', hidden: true }, h('span'), h('span'), h('span'))
+document.body.append(dropIndicator)
+
+function armChannelDrag(event, channel) {
+  // A lone channel cannot move; buttons and the chevron keep their clicks.
+  const movable = ui.channels.filter(({ everyone }) => !everyone)
+  if (event.button !== 0 || event.pointerType !== 'mouse' || channel.everyone || movable.length < 2) return
+  if (event.target.closest('button, .chev-hit')) return
+  const handle = event.currentTarget
+  const session = { startX: event.clientX, startY: event.clientY, promoted: false, dropIndex: null }
+  const sections = () => [...channelNav.querySelectorAll('[data-channel-id]')].map((header) => ({ id: header.dataset.channelId, header: header.getBoundingClientRect(), group: header.parentElement.getBoundingClientRect() }))
+  const end = (commit) => {
+    window.removeEventListener('pointermove', move)
+    window.removeEventListener('pointerup', up)
+    window.removeEventListener('pointercancel', cancel)
+    window.removeEventListener('keydown', key)
+    window.removeEventListener('blur', cancel)
+    dropIndicator.hidden = true
+    document.body.style.cursor = ''
+    document.body.style.userSelect = ''
+    if (!session.promoted) return
+    // The release after a drag must not also open the channel.
+    const swallow = (click) => {
+      click.stopPropagation()
+      click.preventDefault()
+    }
+    window.addEventListener('click', swallow, { capture: true, once: true })
+    setTimeout(() => window.removeEventListener('click', swallow, { capture: true }), 0)
+    if (commit && session.dropIndex !== null) void saveChannelOrder(channel.id, session.dropIndex)
+  }
+  const move = (moved) => {
+    if (!session.promoted) {
+      if (Math.hypot(moved.clientX - session.startX, moved.clientY - session.startY) < CHANNEL_DRAG_THRESHOLD_PX) return
+      session.promoted = true
+      document.body.style.cursor = 'grabbing'
+      document.body.style.userSelect = 'none'
+    }
+    const rects = sections()
+    // Over a header, its middle splits before from after; over its cards, the nearer edge of the section wins.
+    const y = moved.clientY
+    session.dropIndex = rects.filter(({ header, group }) => y > (y >= header.top && y <= header.bottom ? (header.top + header.bottom) / 2 : (group.top + group.bottom) / 2)).length
+    const next = rects[session.dropIndex]
+    const nav = channelNav.getBoundingClientRect()
+    const top = next ? next.header.top - 2 : rects.at(-1).group.bottom + 2
+    dropIndicator.style.top = `${Math.min(Math.max(top, nav.top), nav.bottom)}px`
+    dropIndicator.style.left = `${nav.left + 12}px`
+    dropIndicator.style.width = `${nav.width - 20}px`
+    dropIndicator.hidden = false
+  }
+  const up = () => end(true)
+  const cancel = () => end(false)
+  const key = (pressed) => pressed.key === 'Escape' && end(false)
+  window.addEventListener('pointermove', move)
+  window.addEventListener('pointerup', up)
+  window.addEventListener('pointercancel', cancel)
+  window.addEventListener('keydown', key)
+  window.addEventListener('blur', cancel)
+}
+
+async function saveChannelOrder(channelId, dropIndex) {
+  const ids = ui.channels.filter(({ everyone }) => !everyone).map(({ id }) => id)
+  const from = ids.indexOf(channelId)
+  const next = ids.filter((id) => id !== channelId)
+  next.splice(from < dropIndex ? dropIndex - 1 : dropIndex, 0, channelId)
+  if (from === -1 || next.every((id, index) => id === ids[index])) return
+  const previous = ui.channels
+  const byId = new Map(previous.map((channel) => [channel.id, channel]))
+  const queue = next.map((id) => byId.get(id))
+  ui.channels = previous.map((channel) => (channel.everyone ? channel : queue.shift()))
+  renderChannels()
+  await api('channels/order', { ids: next }).catch(() => {
+    // The server refused (the list changed under the drag); show the order it still has.
+    if (ui.channels !== previous) {
+      ui.channels = previous
+      renderChannels()
+    }
+  })
 }
 
 // --- Menus: one popover for right-click menus and the "+" menu, styled as Orca's context menu.

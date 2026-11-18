@@ -10,6 +10,7 @@ import {
   deliveredThrough,
   parseTempoCommand,
   planHandoffs,
+  reorderChannels,
   staminaPercent,
   type Channel,
   type Member
@@ -163,6 +164,15 @@ describe('#all', () => {
     assert.equal(linkEveryoneChannel(reloaded).id, all.id)
     assert.equal(reloaded.channels.length, 2)
     assert.equal(reloaded.channels[0].members[1], reloaded.channels[1].members[1])
+  })
+})
+
+describe('channel order', () => {
+  it('moves the channels the master named and leaves #all in its slot', () => {
+    const channel = (id: string, everyone?: true): Channel => ({ id, name: id, cwd: '', checkCommand: '', members: [], messages: [], nextSeq: 1, agentChain: 0, everyone })
+    const channels = [channel('all', true), channel('a'), channel('b'), channel('c')]
+    assert.deepEqual(reorderChannels(channels, ['c', 'a', 'b'])?.map(({ id }) => id), ['all', 'c', 'a', 'b'])
+    for (const bad of [['a', 'b'], ['a', 'b', 'c', 'all'], ['a', 'a', 'b'], ['a', 'b', 'x'], 'a,b,c', undefined]) assert.equal(reorderChannels(channels, bad), null)
   })
 })
 

@@ -127,6 +127,18 @@ export function linkEveryoneChannel(state: State): Channel {
   return everyone
 }
 
+/**
+ * The channel list in the master's order. `ids` names every channel but #all, which keeps its slot;
+ * null when they are not exactly the existing channels.
+ */
+export function reorderChannels(channels: readonly Channel[], ids: unknown): Channel[] | null {
+  const movable = channels.filter((channel) => !channel.everyone)
+  const byId = new Map(movable.map((channel) => [channel.id, channel]))
+  if (!Array.isArray(ids) || ids.length !== byId.size || new Set(ids).size !== ids.length || !ids.every((id) => byId.has(id))) return null
+  const next = ids.map((id) => byId.get(id)!)
+  return channels.map((channel) => (channel.everyone ? channel : next.shift()!))
+}
+
 export function deliveredThrough(channel: Channel, member: Member): number {
   return channel.everyone ? (channel.delivered?.[member.id] ?? 0) : member.deliveredThrough
 }

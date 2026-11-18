@@ -17,6 +17,7 @@ import {
   type Attachment,
   linkEveryoneChannel,
   projectFolder,
+  reorderChannels,
   toLocale,
   type Channel,
   type Harness,
@@ -586,6 +587,13 @@ async function handleApi(
     state.channels.push(channel)
     publishState()
     return sendJson(response, 201, { channel })
+  }
+  if (route === 'POST /api/channels/order') {
+    const channels = reorderChannels(state.channels, body.ids)
+    if (!channels) throw new HttpError(400, 'badOrder')
+    state.channels = channels
+    publishState()
+    return sendJson(response, 200, {})
   }
   if (parts[1] === 'channels' && parts[3] === 'members') {
     const channel = folderChannelById(id)
