@@ -2,7 +2,8 @@ import assert from 'node:assert/strict'
 import { it } from 'node:test'
 import { addressTo } from './compose.js'
 
-it('addresses plain text to the reply target, but keeps explicit mentions and commands', () => {
+it('addresses plain text to the reply target, commands included, but keeps explicit mentions', () => {
+  assert.equal(addressTo('/model claude-opus-5-5 high', 'Claude'), '@Claude /model claude-opus-5-5 high')
   assert.equal(addressTo('이어서 해줘', 'Claude'), '@Claude 이어서 해줘')
   assert.equal(addressTo('@리뷰어 봐줘', 'Claude'), '@리뷰어 봐줘')
   assert.equal(addressTo('/tempo @Claude 다시', 'Claude'), '/tempo @Claude 다시')
