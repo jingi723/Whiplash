@@ -80,6 +80,15 @@ describe('createProject', () => {
   })
 })
 
+describe('createWorktree on a plain folder', () => {
+  it('hands back the folder itself instead of failing', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'whiplash-plain-'))
+    const trees = join(root, 'trees')
+    assert.equal(await createWorktree(root, trees, 'plain', 'coder', 'abc123'), root)
+    assert.equal(existsSync(trees), false)
+  })
+})
+
 describe('worktree cleanup', () => {
   const gitEnv = { GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' }
   Object.assign(process.env, gitEnv)

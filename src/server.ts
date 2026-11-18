@@ -319,7 +319,7 @@ async function addMember(channel: Channel, body: Record<string, unknown>): Promi
         throw new HttpError(400, 'worktreeFailed', { detail: error.message.trim() })
       })
     : channel.cwd
-  if (body.worktree && body.harness === 'claude') {
+  if (cwd !== channel.cwd && body.harness === 'claude') {
     // As Orca does: a folder Whiplash just made needs no trust prompt. A busy config only means the prompt still shows.
     await grantClaudeWorkspaceTrust(resolveLocalClaudeTrustConfig(agentEnv()), cwd).catch(() => 'unreadable')
   }

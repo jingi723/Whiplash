@@ -3090,15 +3090,17 @@ function channelCreateStep() {
   )
 }
 
-function hireDialog(channel) {
+async function hireDialog(channel) {
+  // A plain folder has no git, so the member just works in it.
+  const { git } = await api(apiPath({ kind: 'channels', id: channel.id }, 'git')).catch(() => ({ git: null }))
   showDialog(
     t('hire.title', { channel: channel.name }),
     [
       field(t('hire.name'), h('input', { name: 'name', required: true, autofocus: true, placeholder: 'Coder-Agent' })),
       field(t('hire.kind'), h('select', { name: 'harness' }, h('option', { value: 'claude' }, 'Claude Code'), h('option', { value: 'codex' }, 'Codex'))),
       field(t('hire.instructions'), h('textarea', { name: 'instructions', rows: 3 })),
-      h('label', { class: 'check' }, h('input', { type: 'checkbox', name: 'worktree', checked: true }), t('hire.worktree'))
-    ],
+      git && h('label', { class: 'check' }, h('input', { type: 'checkbox', name: 'worktree', checked: true }), t('hire.worktree'))
+    ].filter(Boolean),
     t('hire.submit'),
     async (data) => {
       await api(`channels/${channel.id}/members`, {

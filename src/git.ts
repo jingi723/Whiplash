@@ -78,6 +78,8 @@ export async function createWorktree(
   name: string,
   suffix: string
 ): Promise<string> {
+  // A plain folder has nothing to branch from, so the member works in the folder itself.
+  if (!(await git(repoCwd, 'rev-parse', '--is-inside-work-tree').then(() => true, () => false))) return repoCwd
   const path = join(worktreeRoot, `${channel}-${name}-${suffix}`)
   await mkdir(worktreeRoot, { recursive: true })
   await git(repoCwd, 'worktree', 'add', '-b', `whiplash/${name}-${suffix}`, path)
