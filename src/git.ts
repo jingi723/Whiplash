@@ -1,8 +1,8 @@
 import { execFile } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
-import { mkdir } from 'node:fs/promises'
-import { join } from 'node:path'
+import { mkdir, readdir } from 'node:fs/promises'
+import { join, relative } from 'node:path'
 import { promisify } from 'node:util'
 
 const run = promisify(execFile)
@@ -174,15 +174,20 @@ export async function listFiles(root: string): Promise<{ paths: string[]; trunca
 
 const SKIPPED_DIRS = new Set(['.git', 'node_modules', 'dist', 'build', '.next', 'target', '.venv'])
 
+/** Breadth-first, never entering skipped dirs, and stopping one past the limit so `truncated` still shows. */
 async function walkFolder(root: string): Promise<string[]> {
-  const { readdir } = await import('node:fs/promises')
-  const { relative, join: joinPath, sep } = await import('node:path')
-  const entries = await readdir(root, { recursive: true, withFileTypes: true })
-  return entries
-    .filter((entry) => entry.isFile())
-    .map((entry) => relative(root, joinPath(entry.parentPath, entry.name)))
-    .filter((path) => !path.split(sep).some((part) => SKIPPED_DIRS.has(part)))
-    .sort()
+  const files: string[] = []
+  const queue = [root]
+  for (let i = 0; i < queue.length && files.length <= FILE_LIST_LIMIT; i++) {
+    const entries = await readdir(queue[i], { withFileTypes: true }).catch(() => [])
+    for (const entry of entries) {
+      const path = join(queue[i], entry.name)
+      if (entry.isDirectory()) {
+        if (!SKIPPED_DIRS.has(entry.name)) queue.push(path)
+      } else if (entry.isFile() && files.push(relative(root, path)) > FILE_LIST_LIMIT) break
+    }
+  }
+  return files.sort()
 }
 
 /** A relative path from the browser, resolved strictly inside the project; symlinks out of it are refused. */

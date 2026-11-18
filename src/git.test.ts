@@ -29,6 +29,15 @@ describe('project browsing', () => {
     assert.ok(!paths.includes('secret.txt'))
   })
 
+  it('walks a plain folder without entering node_modules', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'whiplash-plain-'))
+    mkdirSync(join(root, 'src'))
+    mkdirSync(join(root, 'node_modules', 'x'), { recursive: true })
+    writeFileSync(join(root, 'src', 'a.ts'), '')
+    writeFileSync(join(root, 'node_modules', 'x', 'b.js'), '')
+    assert.deepEqual(await listFiles(root), { paths: ['src/a.ts'], truncated: false })
+  })
+
   it('reads text, flags binaries, and refuses paths outside the project', async () => {
     const root = repo()
     assert.equal((await readProjectFile(root, 'src/login.ts')).text, 'export const label = "Login"\n')
